@@ -673,8 +673,14 @@ def generate_sdk(dump_dir: str, out_dir: str, engine: str = "auto"):
         generate_unity_il2cpp_types_header(out_dir)
         print(f"Generated Unity IL2CPP SDK in {out_dir}/ ({len(packages)} assemblies)")
     else:
-        packages = generate_package_headers(classes_data, structs_data, out_dir)
-        generate_master_header(packages, out_dir, offsets_data=offsets_data)
+        from src.output.ue_sdk_v2 import generate_v2_master_header, generate_v2_package_headers, has_v2_dump
+
+        if has_v2_dump(dump_dir):
+            packages = generate_v2_package_headers(dump_dir, out_dir)
+            generate_v2_master_header(packages, out_dir)
+        else:
+            packages = generate_package_headers(classes_data, structs_data, out_dir)
+            generate_master_header(packages, out_dir, offsets_data=offsets_data)
         generate_offsets_header(offsets_data, out_dir)
         generate_chains_header(out_dir, classes_data=classes_data, structs_data=structs_data)
         print(f"Generated UE SDK in {out_dir}/ ({len(packages)} packages)")

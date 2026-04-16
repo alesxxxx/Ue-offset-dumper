@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Dict, Optional
 
 from src.core.pe_parser import get_pe_sections
-from src.core.models import EnumInfo, MemberInfo, SDKDump, StructInfo
+from src.core.models import BoolMeta, EnumInfo, MemberInfo, SDKDump, StructInfo, StructLayoutMeta, TypeDesc
 from src.output.utils import lookup_member_offset, resolve_standard_chain
 
 def write_dump_table(
@@ -47,6 +47,9 @@ def write_dump_table(
         "globals_json": "Globals.json",
         "readme": "README.txt",
     }
+    if engine.lower() == "ue":
+        files["classes_info_v2"] = "ClassesInfoV2.json"
+        files["structs_info_v2"] = "StructsInfoV2.json"
 
     globals_block = {}
     if engine.lower() == "ue":
@@ -459,6 +462,189 @@ def write_structs_json(path: str, dump: SDKDump):
     structs = [s for s in dump.structs if not s.is_class]
     _write_structs_file(path, structs)
 
+def write_classes_json_v2(path: str, dump: SDKDump):
+    classes = [s for s in dump.structs if s.is_class]
+    _write_structs_file_v2(path, classes)
+
+def write_structs_json_v2(path: str, dump: SDKDump):
+    structs = [s for s in dump.structs if not s.is_class]
+    _write_structs_file_v2(path, structs)
+
+def _type_desc_to_json(desc: Optional[TypeDesc]) -> Optional[dict]:
+    if desc is None:
+        return None
+    payload = {
+        "kind": desc.kind,
+        "display_name": desc.display_name,
+        "signature_name": desc.signature_name or desc.display_name,
+        "full_name": desc.full_name,
+        "package": desc.package,
+        "size": int(desc.size or 0),
+        "align": int(desc.align or 0),
+        "is_const": bool(desc.is_const),
+        "is_ref": bool(desc.is_ref),
+    }
+    if desc.metadata:
+        payload["metadata"] = dict(desc.metadata)
+    if desc.pointee is not None:
+        payload["pointee"] = _type_desc_to_json(desc.pointee)
+    if desc.inner is not None:
+        payload["inner"] = _type_desc_to_json(desc.inner)
+    if desc.key is not None:
+        payload["key"] = _type_desc_to_json(desc.key)
+    if desc.value is not None:
+        payload["value"] = _type_desc_to_json(desc.value)
+    if desc.enum_underlying is not None:
+        payload["enum_underlying"] = _type_desc_to_json(desc.enum_underlying)
+    return payload
+
+def _bool_meta_to_json(meta: Optional[BoolMeta]) -> Optional[dict]:
+    if meta is None:
+        return None
+    return {
+        "is_native": bool(meta.is_native),
+        "field_mask": int(meta.field_mask),
+        "field_mask_hex": f"0x{int(meta.field_mask) & 0xFF:02X}",
+        "byte_offset": int(meta.byte_offset),
+        "bit_index": int(meta.bit_index),
+    }
+
+def _layout_meta_to_json(layout: Optional[StructLayoutMeta]) -> Optional[dict]:
+    if layout is None:
+        return None
+    return {
+        "min_alignment": int(layout.min_alignment),
+        "aligned_size": int(layout.aligned_size),
+        "unaligned_size": int(layout.unaligned_size),
+        "highest_member_alignment": int(layout.highest_member_alignment),
+        "last_member_end": int(layout.last_member_end),
+        "super_size": int(layout.super_size),
+        "reuses_super_tail_padding": bool(layout.reuses_super_tail_padding),
+    }
+
+def _qualifiers_from_flags(flags: int) -> dict:
+    return {
+        "const": bool(flags & 0x2),
+        "out": bool(flags & 0x100),
+        "ref": bool(flags & 0x800),
+        "return": bool(flags & 0x400),
+        "param": bool(flags & 0x80),
+    }
+
+def _param_signature_fragment(param) -> str:
+    type_text = (
+        param.type_desc.signature_name
+        if getattr(param, "type_desc", None) and getattr(param.type_desc, "signature_name", "")
+        else _property_type_to_cpp(param.type_name)
+    )
+    quals = _qualifiers_from_flags(getattr(param, "flags", 0))
+    if quals["const"] and not type_text.startswith("const "):
+        type_text = f"const {type_text}"
+    if quals["ref"] or quals["out"]:
+        type_text = f"{type_text}&"
+    return f"{type_text} {param.name}"
+
+def _build_function_signature(func) -> str:
+    return_param = getattr(func, "return_param", None)
+    return_type = "void"
+    if return_param is not None:
+        return_type = _param_signature_fragment(return_param).rsplit(" ", 1)[0]
+    params = [
+        _param_signature_fragment(param)
+        for param in getattr(func, "params", [])
+        if not (getattr(param, "flags", 0) & 0x400)
+    ]
+    return f"{return_type} {func.name}({', '.join(params)})"
+
+def _write_structs_file_v2(path: str, items: list):
+    entries = []
+    for s in items:
+        members = []
+        for m in sorted(
+            s.members,
+            key=lambda item: (
+                getattr(item, "storage_offset", item.offset),
+                (item.bool_meta.bit_index if getattr(item, "bool_meta", None) and item.bool_meta.bit_index >= 0 else 0),
+                item.name,
+            ),
+        ):
+            members.append(
+                {
+                    "name": m.name,
+                    "offset": int(m.offset),
+                    "storage_offset": int(getattr(m, "storage_offset", m.offset)),
+                    "size": int(m.size),
+                    "array_dim": int(m.array_dim),
+                    "flags": f"0x{int(m.flags):X}",
+                    "property_class": m.type_name,
+                    "type": _type_desc_to_json(getattr(m, "type_desc", None)),
+                    "bool_meta": _bool_meta_to_json(getattr(m, "bool_meta", None)),
+                }
+            )
+
+        functions = []
+        for f in getattr(s, "functions", []):
+            params = []
+            for p in getattr(f, "params", []):
+                params.append(
+                    {
+                        "name": p.name,
+                        "offset": int(p.offset),
+                        "storage_offset": int(getattr(p, "storage_offset", p.offset)),
+                        "size": int(p.size),
+                        "flags": f"0x{int(p.flags):X}",
+                        "qualifiers": _qualifiers_from_flags(getattr(p, "flags", 0)),
+                        "property_class": p.type_name,
+                        "type": _type_desc_to_json(getattr(p, "type_desc", None)),
+                        "bool_meta": _bool_meta_to_json(getattr(p, "bool_meta", None)),
+                    }
+                )
+            functions.append(
+                {
+                    "name": f.name,
+                    "address": f"0x{int(f.address):X}",
+                    "rva": f"0x{int(getattr(f, 'rva', 0)):X}",
+                    "exec_func": f"0x{int(getattr(f, 'exec_func', 0)):X}",
+                    "flags": f"0x{int(getattr(f, 'flags', 0)):X}",
+                    "signature": _build_function_signature(f),
+                    "return": (
+                        {
+                            "name": f.return_param.name,
+                            "offset": int(f.return_param.offset),
+                            "size": int(f.return_param.size),
+                            "flags": f"0x{int(f.return_param.flags):X}",
+                            "qualifiers": _qualifiers_from_flags(getattr(f.return_param, "flags", 0)),
+                            "property_class": f.return_param.type_name,
+                            "type": _type_desc_to_json(getattr(f.return_param, "type_desc", None)),
+                            "bool_meta": _bool_meta_to_json(getattr(f.return_param, "bool_meta", None)),
+                        }
+                        if getattr(f, "return_param", None) is not None
+                        else None
+                    ),
+                    "params": params,
+                }
+            )
+
+        entries.append(
+            {
+                "name": s.name,
+                "full_name": s.full_name.replace("/Script/", ""),
+                "package": s.package,
+                "kind": "class" if s.is_class else "struct",
+                "size": int(s.size),
+                "super_name": s.super_name,
+                "super_full_name": s.super_full_name.replace("/Script/", "") if getattr(s, "super_full_name", "") else "",
+                "super_chain": list(s.super_chain or []),
+                "layout": _layout_meta_to_json(getattr(s, "layout", None)),
+                "members": members,
+                "functions": functions,
+            }
+        )
+
+    output = {"schema_version": 2, "kind": "ue_structs", "data": entries}
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(output, f, indent=2)
+
 def _write_structs_file(path: str, items: list):
     data_list = []
     for s in items:
@@ -666,6 +852,9 @@ def write_all(
     write_classes_json(classes_path, dump)
     write_structs_json(os.path.join(output_dir, "StructsInfo.json"), dump)
     write_enums_json(os.path.join(output_dir, "EnumsInfo.json"), dump)
+    if engine == "ue":
+        write_classes_json_v2(os.path.join(output_dir, "ClassesInfoV2.json"), dump)
+        write_structs_json_v2(os.path.join(output_dir, "StructsInfoV2.json"), dump)
 
     classes_data = []
     structs_data = []

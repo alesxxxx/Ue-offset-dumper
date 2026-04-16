@@ -14,12 +14,15 @@ from src.core.memory import (
 
 logger = logging.getLogger(__name__)
 from src.core.models import (
+    BoolMeta,
     MemberInfo,
-    StructInfo,
     EnumInfo,
-    SDKDump,
     FunctionInfo,
     FunctionParamInfo,
+    SDKDump,
+    StructInfo,
+    StructLayoutMeta,
+    TypeDesc,
 )
 from src.engines.ue.gnames import read_fname
 from src.engines.ue.version_matrix import (
@@ -81,6 +84,150 @@ _UENUM_NAMES_PROBE_OFFSETS = (0x40, 0x48, 0x50)
 _UFUNCTION_FLAGS_PROBE_OFFSETS = (0x88, 0x80, 0x78, 0x70, 0x68, 0x90, 0xA0, 0xB0)
 
 _ufunction_flags_offset_cache: Dict[str, int] = {}
+
+CPF_CONST_PARM = 0x0000000000000002
+CPF_PARM = 0x0000000000000080
+CPF_OUT_PARM = 0x0000000000000100
+CPF_RETURN_PARM = 0x0000000000000400
+CPF_REFERENCE_PARM = 0x0000000000000800
+CPF_UOBJECT_WRAPPER = 0x0004000000000000
+
+_PROPERTY_CLASS_SIZE_BY_LAYOUT = {
+    "pre425": 0x70,
+    "ue427": 0x78,
+    "ue52plus": 0x70,
+}
+
+_UE_PRIMITIVE_TYPES = {
+    "BoolProperty": ("bool", 1, 1),
+    "ByteProperty": ("uint8_t", 1, 1),
+    "Int8Property": ("int8_t", 1, 1),
+    "Int16Property": ("int16_t", 2, 2),
+    "IntProperty": ("int32_t", 4, 4),
+    "Int64Property": ("int64_t", 8, 8),
+    "UInt16Property": ("uint16_t", 2, 2),
+    "UInt32Property": ("uint32_t", 4, 4),
+    "UInt64Property": ("uint64_t", 8, 8),
+    "FloatProperty": ("float", 4, 4),
+    "DoubleProperty": ("double", 8, 8),
+    "NameProperty": ("FName", 0x8, 0x4),
+    "StrProperty": ("FString", 0x10, 0x8),
+    "TextProperty": ("FText", 0x18, 0x8),
+}
+
+_OBJECT_PROPERTY_NAMES = {
+    "ObjectProperty",
+    "ObjectPtrProperty",
+    "WeakObjectProperty",
+    "LazyObjectProperty",
+    "SoftObjectProperty",
+    "AssetObjectProperty",
+}
+
+_CLASS_PROPERTY_NAMES = {
+    "ClassProperty",
+    "ClassPtrProperty",
+    "SoftClassProperty",
+    "AssetClassProperty",
+}
+
+_DELEGATE_PROPERTY_NAMES = {
+    "DelegateProperty",
+    "MulticastDelegateProperty",
+    "MulticastInlineDelegateProperty",
+    "MulticastSparseDelegateProperty",
+}
+
+_CONTAINER_PROPERTY_NAMES = {
+    "ArrayProperty",
+    "MapProperty",
+    "SetProperty",
+}
+
+_POINTER_LIKE_TYPE_KINDS = {
+    "object",
+    "class",
+    "soft_object",
+    "soft_class",
+    "weak_object",
+    "lazy_object",
+    "object_ptr",
+    "class_ptr",
+    "interface",
+    "field_path",
+    "delegate",
+    "multicast_delegate",
+}
+
+_type_desc_cache: Dict[int, TypeDesc] = {}
+_layout_cache: Dict[int, StructLayoutMeta] = {}
+
+def _align_up(value: int, alignment: int) -> int:
+    alignment = max(1, int(alignment or 1))
+    return (value + alignment - 1) & ~(alignment - 1)
+
+def _sanitize_signature_type(text: str) -> str:
+    return (text or "void").replace("class ", "").replace("struct ", "").strip()
+
+def _ctz8(value: int) -> int:
+    value &= 0xFF
+    if value == 0:
+        return -1
+    idx = 0
+    while value and (value & 1) == 0:
+        value >>= 1
+        idx += 1
+    return idx
+
+def _ue_property_base_size(ue_version: str) -> int:
+    layout = get_ffield_layout(ue_version)
+    return _PROPERTY_CLASS_SIZE_BY_LAYOUT.get(layout, 0x78)
+
+def _cached_uobject_name(
+    handle: int,
+    obj_ptr: int,
+    gnames_ptr: int,
+    ue_version: str,
+    case_preserving: bool,
+    legacy_names: bool = False,
+) -> str:
+    if not obj_ptr or not _plausible_runtime_ptr(obj_ptr):
+        return ""
+    cached = _uobject_name_cache.get(obj_ptr)
+    if cached is not None:
+        return cached
+    name_idx = read_uint32(handle, obj_ptr + UOBJECT_NAME)
+    name = read_fname(
+        handle,
+        gnames_ptr,
+        name_idx,
+        ue_version,
+        case_preserving,
+        legacy=legacy_names,
+    )
+    _uobject_name_cache[obj_ptr] = name or ""
+    return name or ""
+
+def _cached_full_object_name(
+    handle: int,
+    obj_ptr: int,
+    gnames_ptr: int,
+    ue_version: str,
+    case_preserving: bool,
+    legacy_names: bool = False,
+) -> str:
+    if not obj_ptr or not _plausible_runtime_ptr(obj_ptr):
+        return ""
+    name = _cached_uobject_name(
+        handle, obj_ptr, gnames_ptr, ue_version, case_preserving, legacy_names
+    )
+    if not name:
+        return ""
+    outer_ptr = read_uint64(handle, obj_ptr + UOBJECT_OUTER)
+    outer_name = _cached_uobject_name(
+        handle, outer_ptr, gnames_ptr, ue_version, case_preserving, legacy_names
+    ) if outer_ptr else ""
+    return f"{outer_name}.{name}" if outer_name else name
 
 def _plausible_uobject_class_ptr(value: int) -> bool:
     return 0x1000000 < value < 0x7FFFFFFFFFFF
@@ -234,6 +381,7 @@ def _scatter_walk_ffield_chains(
                         type_name=type_name,
                         array_dim=max(array_dim, 1),
                         flags=prop_flags,
+                        property_ptr=curr_ptr,
                     )
                 )
 
@@ -886,10 +1034,672 @@ def walk_sdk(
             _bulk_ctx.__exit__(None, None, None)
         clear_memory_snapshots()
 
+    _enrich_ue_dump_metadata(
+        dump,
+        handle,
+        gnames_ptr,
+        ue_version,
+        case_preserving,
+        legacy_names=legacy_names,
+    )
+
     if progress_callback:
         progress_callback(num_elements, num_elements)
 
     return dump
+
+def _compute_desc_signature_name(desc: Optional[TypeDesc]) -> str:
+    if desc is None:
+        return "void"
+
+    if desc.signature_name:
+        return desc.signature_name
+
+    if desc.kind in {"primitive", "opaque"}:
+        desc.signature_name = desc.display_name or "uint8_t"
+        return desc.signature_name
+
+    if desc.kind == "enum":
+        desc.signature_name = desc.display_name or desc.full_name.split(".")[-1]
+        return desc.signature_name
+
+    if desc.kind == "named_struct":
+        desc.signature_name = desc.display_name or desc.full_name.split(".")[-1]
+        return desc.signature_name
+
+    if desc.kind == "object":
+        target = _compute_desc_signature_name(desc.pointee) if desc.pointee else "UObject"
+        desc.signature_name = f"{target}*"
+        return desc.signature_name
+
+    if desc.kind == "object_ptr":
+        target = _compute_desc_signature_name(desc.pointee) if desc.pointee else "UObject"
+        desc.signature_name = f"TObjectPtr<{target}>"
+        return desc.signature_name
+
+    if desc.kind == "class":
+        target = _compute_desc_signature_name(desc.pointee) if desc.pointee else "UObject"
+        desc.signature_name = (
+            f"TSubclassOf<{target}>"
+            if desc.metadata.get("is_subclass_of")
+            else "UClass*"
+        )
+        return desc.signature_name
+
+    if desc.kind == "class_ptr":
+        target = _compute_desc_signature_name(desc.pointee) if desc.pointee else "UObject"
+        desc.signature_name = f"TObjectPtr<UClass>"
+        if target and target != "UObject":
+            desc.signature_name = f"TObjectPtr<UClass /* {target} */>"
+        return desc.signature_name
+
+    if desc.kind == "weak_object":
+        target = _compute_desc_signature_name(desc.pointee) if desc.pointee else "UObject"
+        desc.signature_name = f"TWeakObjectPtr<{target}>"
+        return desc.signature_name
+
+    if desc.kind == "lazy_object":
+        target = _compute_desc_signature_name(desc.pointee) if desc.pointee else "UObject"
+        desc.signature_name = f"TLazyObjectPtr<{target}>"
+        return desc.signature_name
+
+    if desc.kind == "soft_object":
+        target = _compute_desc_signature_name(desc.pointee) if desc.pointee else "UObject"
+        desc.signature_name = f"TSoftObjectPtr<{target}>"
+        return desc.signature_name
+
+    if desc.kind == "soft_class":
+        target = _compute_desc_signature_name(desc.pointee) if desc.pointee else "UObject"
+        desc.signature_name = f"TSoftClassPtr<{target}>"
+        return desc.signature_name
+
+    if desc.kind == "interface":
+        target = _compute_desc_signature_name(desc.pointee) if desc.pointee else "UInterface"
+        desc.signature_name = f"TScriptInterface<{target}>"
+        return desc.signature_name
+
+    if desc.kind == "field_path":
+        target = _compute_desc_signature_name(desc.pointee) if desc.pointee else "FField"
+        desc.signature_name = f"TFieldPath<{target}>"
+        return desc.signature_name
+
+    if desc.kind == "array":
+        inner = _compute_desc_signature_name(desc.inner) if desc.inner else "uint8_t"
+        desc.signature_name = f"TArray<{inner}>"
+        return desc.signature_name
+
+    if desc.kind == "set":
+        inner = _compute_desc_signature_name(desc.inner) if desc.inner else "uint8_t"
+        desc.signature_name = f"TSet<{inner}>"
+        return desc.signature_name
+
+    if desc.kind == "map":
+        key = _compute_desc_signature_name(desc.key) if desc.key else "uint8_t"
+        value = _compute_desc_signature_name(desc.value) if desc.value else "uint8_t"
+        desc.signature_name = f"TMap<{key}, {value}>"
+        return desc.signature_name
+
+    if desc.kind == "delegate":
+        target = desc.signature_name or desc.metadata.get("delegate_type_name") or "FScriptDelegate"
+        desc.signature_name = target
+        return target
+
+    if desc.kind == "multicast_delegate":
+        target = desc.signature_name or desc.metadata.get("delegate_type_name") or "FMulticastScriptDelegate"
+        desc.signature_name = target
+        return target
+
+    if desc.kind == "pair":
+        key = _compute_desc_signature_name(desc.key) if desc.key else "uint8_t"
+        value = _compute_desc_signature_name(desc.value) if desc.value else "uint8_t"
+        desc.signature_name = f"TPair<{key}, {value}>"
+        return desc.signature_name
+
+    desc.signature_name = desc.display_name or desc.kind or "uint8_t"
+    return desc.signature_name
+
+def _type_align_from_display(display_name: str, size_hint: int = 0) -> int:
+    base = _sanitize_signature_type(display_name)
+    fixed = {
+        "bool": 1,
+        "uint8_t": 1,
+        "int8_t": 1,
+        "uint16_t": 2,
+        "int16_t": 2,
+        "uint32_t": 4,
+        "int32_t": 4,
+        "float": 4,
+        "FName": 4,
+        "uint64_t": 8,
+        "int64_t": 8,
+        "double": 8,
+        "UClass*": 8,
+        "FString": 8,
+        "FText": 8,
+    }
+    if base.endswith("*"):
+        return 8
+    if base.startswith(("TArray<", "TMap<", "TSet<", "TWeakObjectPtr<", "TLazyObjectPtr<", "TSoftObjectPtr<", "TSoftClassPtr<", "TScriptInterface<", "TFieldPath<", "TObjectPtr<", "TSubclassOf<")):
+        return 8
+    if base in fixed:
+        return fixed[base]
+    if size_hint >= 8:
+        return 8
+    if size_hint >= 4:
+        return 4
+    if size_hint >= 2:
+        return 2
+    return 1
+
+def _desc_alignment(desc: Optional[TypeDesc], size_hint: int = 0) -> int:
+    if desc is None:
+        return _type_align_from_display("", size_hint)
+    if desc.align:
+        return int(desc.align)
+    return _type_align_from_display(_compute_desc_signature_name(desc), size_hint or desc.size)
+
+def _make_named_type_desc(kind: str, full_name: str, size: int = 0, align: int = 0) -> TypeDesc:
+    short_name = full_name.split(".")[-1] if full_name else ""
+    package = full_name.split(".", 1)[0] if "." in full_name else ""
+    return TypeDesc(
+        kind=kind,
+        display_name=short_name,
+        full_name=full_name,
+        package=package,
+        size=size,
+        align=align,
+    )
+
+def _make_primitive_desc(property_name: str, size_hint: int = 0) -> TypeDesc:
+    display_name, known_size, known_align = _UE_PRIMITIVE_TYPES.get(
+        property_name,
+        ("uint8_t", size_hint or 1, _type_align_from_display("uint8_t", size_hint or 1)),
+    )
+    size_value = size_hint or known_size
+    return TypeDesc(
+        kind="primitive",
+        display_name=display_name,
+        size=size_value,
+        align=known_align or _type_align_from_display(display_name, size_value),
+    )
+
+def _resolve_property_type_desc(
+    handle: int,
+    prop_ptr: int,
+    property_name: str,
+    gnames_ptr: int,
+    ue_version: str,
+    case_preserving: bool,
+    legacy_names: bool = False,
+    property_flags: int = 0,
+    size_hint: int = 0,
+    _stack: Optional[set] = None,
+) -> TypeDesc:
+    if prop_ptr in _type_desc_cache:
+        return _type_desc_cache[prop_ptr]
+
+    if _stack is None:
+        _stack = set()
+    if prop_ptr in _stack:
+        return TypeDesc(kind="opaque", display_name="uint8_t", size=size_hint or 1, align=1)
+    _stack.add(prop_ptr)
+
+    base_size = _ue_property_base_size(ue_version)
+    result = TypeDesc(
+        kind="opaque",
+        display_name="uint8_t",
+        size=size_hint or 1,
+        align=_type_align_from_display("uint8_t", size_hint or 1),
+        metadata={"property_name": property_name},
+    )
+    _type_desc_cache[prop_ptr] = result
+
+    try:
+        if property_name == "ByteProperty":
+            enum_ptr = read_uint64(handle, prop_ptr + base_size)
+            if enum_ptr and _plausible_runtime_ptr(enum_ptr):
+                enum_name = _cached_full_object_name(
+                    handle, enum_ptr, gnames_ptr, ue_version, case_preserving, legacy_names
+                )
+                result = _make_named_type_desc("enum", enum_name, size=1, align=1)
+                result.enum_underlying = _make_primitive_desc("ByteProperty", size_hint=1)
+            else:
+                result = _make_primitive_desc(property_name, size_hint=size_hint)
+        elif property_name in _UE_PRIMITIVE_TYPES:
+            result = _make_primitive_desc(property_name, size_hint=size_hint)
+        elif property_name == "EnumProperty":
+            underlying_ptr = read_uint64(handle, prop_ptr + base_size)
+            enum_ptr = read_uint64(handle, prop_ptr + base_size + 8)
+            underlying = _resolve_property_type_desc(
+                handle,
+                underlying_ptr,
+                _resolve_property_class_name(
+                    handle,
+                    underlying_ptr,
+                    gnames_ptr,
+                    ue_version,
+                    case_preserving,
+                    legacy_names,
+                ) if underlying_ptr else "ByteProperty",
+                gnames_ptr,
+                ue_version,
+                case_preserving,
+                legacy_names,
+                size_hint=1,
+                _stack=_stack,
+            ) if underlying_ptr else _make_primitive_desc("ByteProperty", 1)
+            enum_name = _cached_full_object_name(
+                handle, enum_ptr, gnames_ptr, ue_version, case_preserving, legacy_names
+            )
+            if enum_name:
+                result = _make_named_type_desc(
+                    "enum",
+                    enum_name,
+                    size=underlying.size or size_hint or 1,
+                    align=underlying.align or 1,
+                )
+                result.enum_underlying = underlying
+            else:
+                result = underlying
+        elif property_name in _OBJECT_PROPERTY_NAMES:
+            target_ptr = read_uint64(handle, prop_ptr + base_size)
+            target_name = _cached_full_object_name(
+                handle, target_ptr, gnames_ptr, ue_version, case_preserving, legacy_names
+            )
+            target = _make_named_type_desc("named_struct", target_name or "CoreUObject.Object", size=0, align=8)
+            kind = {
+                "WeakObjectProperty": "weak_object",
+                "LazyObjectProperty": "lazy_object",
+                "SoftObjectProperty": "soft_object",
+                "ObjectPtrProperty": "object_ptr",
+            }.get(property_name, "object")
+            result = TypeDesc(
+                kind=kind,
+                pointee=target,
+                size=size_hint or 8,
+                align=8,
+            )
+        elif property_name in _CLASS_PROPERTY_NAMES:
+            meta_offset = base_size + 8
+            if property_name in {"SoftClassProperty", "AssetClassProperty"}:
+                meta_offset = base_size
+            meta_ptr = read_uint64(handle, prop_ptr + meta_offset)
+            meta_name = _cached_full_object_name(
+                handle, meta_ptr, gnames_ptr, ue_version, case_preserving, legacy_names
+            )
+            pointee = _make_named_type_desc("named_struct", meta_name or "CoreUObject.Object", size=0, align=8)
+            if property_name in {"SoftClassProperty", "AssetClassProperty"}:
+                result = TypeDesc(kind="soft_class", pointee=pointee, size=size_hint or 0x28, align=8)
+            elif property_name == "ClassPtrProperty":
+                result = TypeDesc(kind="class_ptr", pointee=pointee, size=size_hint or 8, align=8)
+            else:
+                result = TypeDesc(
+                    kind="class",
+                    pointee=pointee,
+                    size=size_hint or 8,
+                    align=8,
+                    metadata={"is_subclass_of": bool(property_flags & CPF_UOBJECT_WRAPPER)},
+                )
+        elif property_name == "StructProperty":
+            struct_ptr = read_uint64(handle, prop_ptr + base_size)
+            struct_name = _cached_full_object_name(
+                handle, struct_ptr, gnames_ptr, ue_version, case_preserving, legacy_names
+            )
+            result = _make_named_type_desc("named_struct", struct_name, size=size_hint, align=0)
+        elif property_name == "ArrayProperty":
+            inner_ptr = read_uint64(handle, prop_ptr + base_size)
+            inner_type_name = _resolve_property_class_name(
+                handle, inner_ptr, gnames_ptr, ue_version, case_preserving, legacy_names
+            )
+            result = TypeDesc(
+                kind="array",
+                inner=_resolve_property_type_desc(
+                    handle,
+                    inner_ptr,
+                    inner_type_name,
+                    gnames_ptr,
+                    ue_version,
+                    case_preserving,
+                    legacy_names,
+                    size_hint=0,
+                    _stack=_stack,
+                ) if inner_ptr else _make_primitive_desc("ByteProperty", 1),
+                size=size_hint or 0x10,
+                align=8,
+            )
+        elif property_name == "SetProperty":
+            element_ptr = read_uint64(handle, prop_ptr + base_size)
+            inner_type_name = _resolve_property_class_name(
+                handle, element_ptr, gnames_ptr, ue_version, case_preserving, legacy_names
+            )
+            result = TypeDesc(
+                kind="set",
+                inner=_resolve_property_type_desc(
+                    handle,
+                    element_ptr,
+                    inner_type_name,
+                    gnames_ptr,
+                    ue_version,
+                    case_preserving,
+                    legacy_names,
+                    size_hint=0,
+                    _stack=_stack,
+                ) if element_ptr else _make_primitive_desc("ByteProperty", 1),
+                size=size_hint or 0x50,
+                align=8,
+            )
+        elif property_name == "MapProperty":
+            key_ptr = read_uint64(handle, prop_ptr + base_size)
+            value_ptr = read_uint64(handle, prop_ptr + base_size + 8)
+            key_name = _resolve_property_class_name(
+                handle, key_ptr, gnames_ptr, ue_version, case_preserving, legacy_names
+            )
+            value_name = _resolve_property_class_name(
+                handle, value_ptr, gnames_ptr, ue_version, case_preserving, legacy_names
+            )
+            result = TypeDesc(
+                kind="map",
+                key=_resolve_property_type_desc(
+                    handle,
+                    key_ptr,
+                    key_name,
+                    gnames_ptr,
+                    ue_version,
+                    case_preserving,
+                    legacy_names,
+                    _stack=_stack,
+                ) if key_ptr else _make_primitive_desc("ByteProperty", 1),
+                value=_resolve_property_type_desc(
+                    handle,
+                    value_ptr,
+                    value_name,
+                    gnames_ptr,
+                    ue_version,
+                    case_preserving,
+                    legacy_names,
+                    _stack=_stack,
+                ) if value_ptr else _make_primitive_desc("ByteProperty", 1),
+                size=size_hint or 0x50,
+                align=8,
+            )
+        elif property_name == "InterfaceProperty":
+            class_ptr = read_uint64(handle, prop_ptr + base_size)
+            class_name = _cached_full_object_name(
+                handle, class_ptr, gnames_ptr, ue_version, case_preserving, legacy_names
+            )
+            result = TypeDesc(
+                kind="interface",
+                pointee=_make_named_type_desc("named_struct", class_name or "CoreUObject.Interface", size=0, align=8),
+                size=size_hint or 0x10,
+                align=8,
+            )
+        elif property_name == "FieldPathProperty":
+            field_class_ptr = read_uint64(handle, prop_ptr + base_size)
+            field_name = ""
+            if field_class_ptr and _plausible_runtime_ptr(field_class_ptr):
+                field_name_idx = read_uint32(handle, field_class_ptr + 0x0)
+                field_name = read_fname(
+                    handle,
+                    gnames_ptr,
+                    field_name_idx,
+                    ue_version,
+                    case_preserving,
+                    legacy=legacy_names,
+                )
+            pointee_name = f"CoreUObject.{field_name}" if field_name else "CoreUObject.Field"
+            result = TypeDesc(
+                kind="field_path",
+                pointee=_make_named_type_desc("named_struct", pointee_name, size=0, align=8),
+                size=size_hint or 0x10,
+                align=8,
+            )
+        elif property_name in _DELEGATE_PROPERTY_NAMES:
+            signature_ptr = read_uint64(handle, prop_ptr + base_size)
+            signature_name = _cached_full_object_name(
+                handle, signature_ptr, gnames_ptr, ue_version, case_preserving, legacy_names
+            )
+            kind = "multicast_delegate" if "Multicast" in property_name else "delegate"
+            default_name = "FMulticastScriptDelegate" if kind == "multicast_delegate" else "FScriptDelegate"
+            result = TypeDesc(
+                kind=kind,
+                display_name=default_name,
+                signature_name=default_name,
+                size=size_hint or (0x10 if kind == "multicast_delegate" else 0x10),
+                align=8,
+                metadata={"signature_name": signature_name},
+            )
+        else:
+            result = TypeDesc(
+                kind="opaque",
+                display_name="uint8_t",
+                size=size_hint or 1,
+                align=_type_align_from_display("uint8_t", size_hint or 1),
+                metadata={"property_name": property_name},
+            )
+    finally:
+        _stack.discard(prop_ptr)
+
+    result.signature_name = _compute_desc_signature_name(result)
+    if not result.display_name:
+        result.display_name = result.signature_name
+    _type_desc_cache[prop_ptr] = result
+    return result
+
+def _resolve_property_class_name(
+    handle: int,
+    prop_ptr: int,
+    gnames_ptr: int,
+    ue_version: str,
+    case_preserving: bool,
+    legacy_names: bool = False,
+) -> str:
+    if not prop_ptr or not _plausible_runtime_ptr(prop_ptr):
+        return ""
+    if _is_pre_425_ue(ue_version):
+        class_ptr = read_uint64(handle, prop_ptr + UOBJECT_CLASS)
+        return _cached_uobject_name(
+            handle, class_ptr, gnames_ptr, ue_version, case_preserving, legacy_names
+        )
+    offsets = get_ffield_offsets(ue_version)
+    class_ptr = read_uint64(handle, prop_ptr + offsets["FFIELD_CLASS_PRIVATE"])
+    if not class_ptr:
+        return ""
+    cached = _ffield_class_name_cache.get(class_ptr)
+    if cached:
+        return cached
+    type_name_idx = read_uint32(handle, class_ptr + offsets["FFIELDCLASS_NAME"])
+    type_name = read_fname(
+        handle,
+        gnames_ptr,
+        type_name_idx,
+        ue_version,
+        case_preserving,
+        legacy=legacy_names,
+    )
+    if type_name:
+        _ffield_class_name_cache[class_ptr] = type_name
+    return type_name or ""
+
+def _resolve_bool_meta(
+    handle: int,
+    prop_ptr: int,
+    property_name: str,
+    ue_version: str,
+) -> Optional[BoolMeta]:
+    if property_name != "BoolProperty" or not prop_ptr or not _plausible_runtime_ptr(prop_ptr):
+        return None
+    base_size = _ue_property_base_size(ue_version)
+    raw = read_bytes(handle, prop_ptr + base_size, 4)
+    if not raw or len(raw) < 4:
+        return None
+    byte_offset = raw[1]
+    field_mask = raw[3]
+    bit_index = -1 if field_mask == 0xFF else _ctz8(field_mask)
+    return BoolMeta(
+        is_native=field_mask == 0xFF,
+        field_mask=field_mask,
+        byte_offset=byte_offset,
+        bit_index=bit_index,
+    )
+
+def _enrich_ue_dump_metadata(
+    dump: SDKDump,
+    handle: int,
+    gnames_ptr: int,
+    ue_version: str,
+    case_preserving: bool,
+    legacy_names: bool = False,
+) -> None:
+    _type_desc_cache.clear()
+    _layout_cache.clear()
+
+    structs_by_full = {s.full_name: s for s in dump.structs if s.full_name}
+    structs_by_addr = {s.address: s for s in dump.structs if s.address}
+    enums_by_full = {e.full_name: e for e in dump.enums if e.full_name}
+    enum_underlying: Dict[str, str] = {}
+
+    def _apply_struct_desc_metadata(desc: Optional[TypeDesc]) -> None:
+        if desc is None:
+            return
+        if desc.kind == "named_struct" and desc.full_name in structs_by_full:
+            target = structs_by_full[desc.full_name]
+            desc.size = target.size
+            desc.align = (target.layout.min_alignment if target.layout else 0) or desc.align
+        if desc.kind == "enum":
+            underlying = desc.enum_underlying
+            if underlying:
+                enum_underlying[desc.full_name] = _compute_desc_signature_name(underlying)
+        for child in (desc.pointee, desc.inner, desc.key, desc.value, desc.enum_underlying):
+            _apply_struct_desc_metadata(child)
+
+    for struct_info in dump.structs:
+        super_ptr = int((struct_info.metadata or {}).get("super_ptr", 0) or 0)
+        if super_ptr and super_ptr in structs_by_addr:
+            struct_info.super_full_name = structs_by_addr[super_ptr].full_name
+        elif struct_info.super_name:
+            for candidate in dump.structs:
+                if candidate.name == struct_info.super_name:
+                    struct_info.super_full_name = candidate.full_name
+                    break
+
+        for member in struct_info.members:
+            if member.property_ptr:
+                member.type_desc = _resolve_property_type_desc(
+                    handle,
+                    member.property_ptr,
+                    member.type_name,
+                    gnames_ptr,
+                    ue_version,
+                    case_preserving,
+                    legacy_names=legacy_names,
+                    property_flags=member.flags,
+                    size_hint=max(1, member.size // max(1, member.array_dim)),
+                )
+                member.bool_meta = _resolve_bool_meta(handle, member.property_ptr, member.type_name, ue_version)
+            member.storage_offset = member.offset + (member.bool_meta.byte_offset if member.bool_meta else 0)
+            _apply_struct_desc_metadata(member.type_desc)
+
+        for func in struct_info.functions:
+            func.return_param = None
+            for param in func.params:
+                if param.property_ptr:
+                    param.type_desc = _resolve_property_type_desc(
+                        handle,
+                        param.property_ptr,
+                        param.type_name,
+                        gnames_ptr,
+                        ue_version,
+                        case_preserving,
+                        legacy_names=legacy_names,
+                        property_flags=param.flags,
+                        size_hint=max(1, param.size // 1),
+                    )
+                    param.bool_meta = _resolve_bool_meta(handle, param.property_ptr, param.type_name, ue_version)
+                param.storage_offset = param.offset + (param.bool_meta.byte_offset if param.bool_meta else 0)
+                if param.type_desc:
+                    param.type_desc.is_const = bool(param.flags & CPF_CONST_PARM)
+                    param.type_desc.is_ref = bool(param.flags & (CPF_REFERENCE_PARM | CPF_OUT_PARM))
+                _apply_struct_desc_metadata(param.type_desc)
+                if param.flags & CPF_RETURN_PARM:
+                    func.return_param = param
+
+            func.params.sort(key=lambda p: (p.storage_offset if p.storage_offset >= 0 else p.offset, p.name))
+
+    def _compute_layout(struct_info: StructInfo) -> StructLayoutMeta:
+        cached = _layout_cache.get(struct_info.address)
+        if cached is not None:
+            return cached
+
+        super_layout = None
+        super_size = 0
+        if struct_info.super_full_name and struct_info.super_full_name in structs_by_full:
+            super_struct = structs_by_full[struct_info.super_full_name]
+            super_layout = _compute_layout(super_struct)
+            super_size = super_layout.aligned_size or super_struct.size
+
+        min_alignment = int((struct_info.metadata or {}).get("min_alignment", 0) or 0)
+        highest_member_alignment = max(1, super_layout.min_alignment if super_layout else 1)
+        last_member_end = super_layout.last_member_end if super_layout else 0
+        first_own_member_offset = None
+
+        ordered_members = sorted(
+            struct_info.members,
+            key=lambda m: (
+                m.storage_offset if m.storage_offset >= 0 else m.offset,
+                (m.bool_meta.bit_index if m.bool_meta and m.bool_meta.bit_index >= 0 else 0),
+                m.name,
+            ),
+        )
+        struct_info.members[:] = ordered_members
+
+        for member in ordered_members:
+            storage_offset = member.storage_offset if member.storage_offset >= 0 else member.offset
+            if first_own_member_offset is None:
+                first_own_member_offset = storage_offset
+            element_size = max(1, member.size // max(1, member.array_dim))
+            field_alignment = _desc_alignment(member.type_desc, element_size)
+            highest_member_alignment = max(highest_member_alignment, field_alignment)
+            field_storage_size = max(1, element_size if member.array_dim <= 1 else member.size)
+            if member.bool_meta and not member.bool_meta.is_native:
+                field_storage_size = 1
+            last_member_end = max(last_member_end, storage_offset + field_storage_size)
+
+        if min_alignment <= 0:
+            min_alignment = highest_member_alignment or 1
+        aligned_size = _align_up(struct_info.size, min_alignment)
+        reuses_super_tail_padding = bool(
+            super_layout
+            and first_own_member_offset is not None
+            and first_own_member_offset < (super_layout.aligned_size or super_size)
+            and first_own_member_offset >= super_layout.last_member_end
+        )
+        layout = StructLayoutMeta(
+            min_alignment=max(1, min_alignment),
+            aligned_size=max(struct_info.size, aligned_size),
+            unaligned_size=struct_info.size,
+            highest_member_alignment=max(1, highest_member_alignment),
+            last_member_end=max(last_member_end, super_layout.last_member_end if super_layout else 0),
+            super_size=super_size,
+            reuses_super_tail_padding=reuses_super_tail_padding,
+        )
+        struct_info.layout = layout
+        _layout_cache[struct_info.address] = layout
+        return layout
+
+    for struct_info in dump.structs:
+        _compute_layout(struct_info)
+
+    for struct_info in dump.structs:
+        for member in struct_info.members:
+            _apply_struct_desc_metadata(member.type_desc)
+        for func in struct_info.functions:
+            for param in func.params:
+                _apply_struct_desc_metadata(param.type_desc)
+
+    for desc_full_name, underlying_name in enum_underlying.items():
+        enum_info = enums_by_full.get(desc_full_name)
+        if enum_info is not None:
+            enum_info.metadata["underlying_type"] = underlying_name
 
 def _walk_struct(
     handle: int,
@@ -916,10 +1726,12 @@ def _walk_struct(
         super_off = USTRUCT_SUPER_LEGACY
         children_off = USTRUCT_CHILDREN_LEGACY
         props_size_off = USTRUCT_PROPERTIES_SIZE_LEGACY
+        min_alignment_off = USTRUCT_MIN_ALIGNMENT_LEGACY
     else:
         super_off = USTRUCT_SUPER
         children_off = USTRUCT_CHILDREN
         props_size_off = USTRUCT_PROPERTIES_SIZE
+        min_alignment_off = USTRUCT_MIN_ALIGNMENT
 
     def _cached_obj_name(ptr: int) -> str:
         cached = _uobject_name_cache.get(ptr)
@@ -945,6 +1757,7 @@ def _walk_struct(
         super_ptr = _s.unpack_from("<Q", _hdr, super_off)[0]
         super_name = _cached_obj_name(super_ptr) if super_ptr else ""
         child_ptr = _s.unpack_from("<Q", _hdr, children_off)[0]
+        min_alignment = _s.unpack_from("<I", _hdr, min_alignment_off)[0] if len(_hdr) >= min_alignment_off + 4 else 0
     else:
         name = _cached_obj_name(struct_ptr)
         if not name:
@@ -957,6 +1770,7 @@ def _walk_struct(
         super_ptr = read_uint64(handle, struct_ptr + super_off)
         super_name = _cached_obj_name(super_ptr) if super_ptr else ""
         child_ptr = None
+        min_alignment = read_uint32(handle, struct_ptr + min_alignment_off)
 
     full_name = f"{package}.{name}" if package else name
 
@@ -991,6 +1805,8 @@ def _walk_struct(
         package=package,
         super_chain=super_chain,
     )
+    info.metadata["super_ptr"] = super_ptr
+    info.metadata["min_alignment"] = int(min_alignment or 0)
 
     visited: set = set()
     max_props = 500
@@ -1248,6 +2064,7 @@ def _read_ufunction(
                     size=member.size,
                     type_name=member.type_name,
                     flags=flags,
+                    property_ptr=child_ptr,
                 )
                 func_info.params.append(param)
 
@@ -1274,6 +2091,7 @@ def _read_ufunction(
                     size=member.size,
                     type_name=member.type_name,
                     flags=getattr(member, 'flags', 0),
+                    property_ptr=getattr(member, "property_ptr", 0),
                 )
                 func_info.params.append(param)
         else:
@@ -1355,6 +2173,7 @@ def _read_uproperty(
         size=size,
         type_name=type_name or "Unknown",
         array_dim=array_dim if array_dim > 1 else 1,
+        property_ptr=prop_ptr,
     )
 
 def _read_property(
@@ -1406,6 +2225,7 @@ def _read_property(
         type_name=type_name or "Unknown",
         array_dim=array_dim if array_dim > 1 else 1,
         flags=flags,
+        property_ptr=prop_ptr,
     )
 
 def _walk_enum(

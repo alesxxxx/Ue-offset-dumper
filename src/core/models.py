@@ -1,6 +1,41 @@
 
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
+
+@dataclass
+class TypeDesc:
+    kind: str
+    display_name: str = ""
+    full_name: str = ""
+    package: str = ""
+    size: int = 0
+    align: int = 0
+    is_const: bool = False
+    is_ref: bool = False
+    pointee: Optional["TypeDesc"] = None
+    inner: Optional["TypeDesc"] = None
+    key: Optional["TypeDesc"] = None
+    value: Optional["TypeDesc"] = None
+    enum_underlying: Optional["TypeDesc"] = None
+    signature_name: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+@dataclass
+class BoolMeta:
+    is_native: bool
+    field_mask: int = 0xFF
+    byte_offset: int = 0
+    bit_index: int = -1
+
+@dataclass
+class StructLayoutMeta:
+    min_alignment: int = 1
+    aligned_size: int = 0
+    unaligned_size: int = 0
+    highest_member_alignment: int = 1
+    last_member_end: int = 0
+    super_size: int = 0
+    reuses_super_tail_padding: bool = False
 
 @dataclass
 class MemberInfo:
@@ -12,6 +47,10 @@ class MemberInfo:
     is_static: bool = False
     flags: int = 0
     metadata: Dict[str, Any] = field(default_factory=dict)
+    type_desc: Optional[TypeDesc] = None
+    bool_meta: Optional[BoolMeta] = None
+    property_ptr: int = 0
+    storage_offset: int = -1
 
 @dataclass
 class FunctionParamInfo:
@@ -20,6 +59,11 @@ class FunctionParamInfo:
     size: int
     type_name: str
     flags: int = 0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    type_desc: Optional[TypeDesc] = None
+    bool_meta: Optional[BoolMeta] = None
+    property_ptr: int = 0
+    storage_offset: int = -1
 
 @dataclass
 class FunctionInfo:
@@ -29,6 +73,8 @@ class FunctionInfo:
     flags: int = 0
     exec_func: int = 0
     params: List[FunctionParamInfo] = field(default_factory=list)
+    return_param: Optional[FunctionParamInfo] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 @dataclass
 class StructInfo:
@@ -43,6 +89,8 @@ class StructInfo:
     functions: List[FunctionInfo] = field(default_factory=list)
     super_chain: List[str] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
+    super_full_name: str = ""
+    layout: Optional[StructLayoutMeta] = None
 
 @dataclass
 class EnumInfo:
@@ -50,6 +98,7 @@ class EnumInfo:
     full_name: str
     address: int
     values: List[Tuple[str, int]] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 @dataclass
 class SDKDump:
