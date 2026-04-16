@@ -53,7 +53,7 @@ from src.ui.theme import (
     MinimalDropdown, make_entry, make_scrollbar, make_gradient_rule,
     make_button as _make_button, make_card as _make_card,
     configure_treeview_style, configure_combobox_style,
-    configure_progressbar_style, configure_entry_style,
+    configure_progressbar_style, configure_entry_style, set_ui_scale,
 )
 
 DIM = FG_DIM
@@ -693,10 +693,40 @@ class DumperApp:
         configure_combobox_style(style, self.root, scale=self._active_dpi_scale)
         configure_treeview_style(style, scale=self._active_dpi_scale)
 
+    def _ui_px(self, value, minimum=0) -> int:
+        return max(minimum, int(round(float(value) * max(0.8, float(self._active_dpi_scale or 1.0)))))
+
+    def _geometry_spec(self, width: int, height: int) -> str:
+        return f"{self._ui_px(width, minimum=1)}x{self._ui_px(height, minimum=1)}"
+
+    def _set_window_size(
+        self,
+        window: tk.Toplevel | tk.Tk,
+        width: int,
+        height: int,
+        *,
+        min_width: int | None = None,
+        min_height: int | None = None,
+    ) -> tuple[int, int]:
+        scaled_width = int(width)
+        scaled_height = int(height)
+        window.geometry(f"{scaled_width}x{scaled_height}")
+        if min_width is not None and min_height is not None:
+            window.minsize(int(min_width), int(min_height))
+        return scaled_width, scaled_height
+
+    def _center_popup(self, popup: tk.Toplevel, width: int, height: int):
+        scaled_width = int(width)
+        scaled_height = int(height)
+        x = self.root.winfo_x() + (self.root.winfo_width() // 2) - (scaled_width // 2)
+        y = self.root.winfo_y() + (self.root.winfo_height() // 2) - (scaled_height // 2)
+        popup.geometry(f"{scaled_width}x{scaled_height}+{x}+{y}")
+
     def _apply_dpi_scale(self, scale=None, *, persist: bool = False) -> float:
         factor = self._sanitize_dpi_scale(
             self._gui_settings.get("dpi_scale", 1.0) if scale is None else scale
         )
+        set_ui_scale(factor)
         try:
             self.root.tk.call("tk", "scaling", self._system_tk_scaling * factor)
         except Exception:
@@ -1078,6 +1108,8 @@ class DumperApp:
         log_card = tk.Frame(main, bg=BG_CARD, bd=0,
                            highlightbackground=BORDER, highlightthickness=1)
         log_card.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+        log_card.configure(height=self._ui_px(220, minimum=170))
+        log_card.pack_propagate(False)
 
         log_header = tk.Frame(log_card, bg=BG_CARD)
         log_header.pack(fill=tk.X, padx=12, pady=(8, 0))
@@ -1721,8 +1753,7 @@ class DumperApp:
         popup = tk.Toplevel(self.root)
         popup.title("Scan Recovery")
         popup.configure(bg=BG)
-        popup.geometry("560x300")
-        popup.minsize(520, 260)
+        self._set_window_size(popup, 560, 300, min_width=520, min_height=260)
         popup.resizable(True, True)
 
         shell = tk.Frame(popup, bg=BG, padx=16, pady=14)
@@ -1779,8 +1810,7 @@ class DumperApp:
         popup = tk.Toplevel(self.root)
         popup.title("Settings")
         popup.configure(bg=BG)
-        popup.geometry("620x400")
-        popup.minsize(560, 340)
+        self._set_window_size(popup, 620, 400, min_width=560, min_height=340)
 
         shell = tk.Frame(popup, bg=BG, padx=16, pady=16)
         shell.pack(fill=tk.BOTH, expand=True)
@@ -1840,7 +1870,7 @@ class DumperApp:
         ).pack(side=tk.LEFT, padx=(0, 10))
         tk.Label(
             dpi_row,
-            text="Relative to your current Windows DPI. Apply updates the live UI scale.",
+            text="Saved for the next launch so the whole menu layout resizes cleanly.",
             font=FONT_UI_XS,
             fg=FG_SUBTLE,
             bg=BG_CARD,
@@ -1885,18 +1915,25 @@ class DumperApp:
         ).pack(side=tk.LEFT)
 
         def _apply_settings():
-            previous_scale = self._active_dpi_scale
-            applied_scale = self._apply_dpi_scale(self._parse_dpi_scale_label(dpi_var.get()), persist=True)
-            if abs(applied_scale - previous_scale) > 0.001:
+            selected_scale = self._parse_dpi_scale_label(dpi_var.get())
+            previous_scale = self._sanitize_dpi_scale(self._gui_settings.get("dpi_scale", 1.0))
+            self._gui_settings["dpi_scale"] = selected_scale
+            self._persist_gui_settings()
+            if abs(selected_scale - previous_scale) > 0.001:
                 self._log(
-                    f"DPI scale set to {self._dpi_scale_label(applied_scale)} of system DPI.",
+                    f"DPI scale saved at {self._dpi_scale_label(selected_scale)}. Reopen Dumper to apply the full menu resize.",
                     "ok",
+                )
+                messagebox.showinfo(
+                    "UE/Unity Dumper",
+                    "DPI scale saved.\n\nRestart or reopen the dumper to resize the full menu cleanly.",
                 )
             else:
                 self._log(
-                    f"DPI scale remains {self._dpi_scale_label(applied_scale)} of system DPI.",
+                    f"DPI scale remains {self._dpi_scale_label(selected_scale)}.",
                     "dim",
                 )
+            popup.destroy()
 
         footer = tk.Frame(shell, bg=BG)
         footer.pack(fill=tk.X, pady=(10, 0))
@@ -1930,8 +1967,7 @@ class DumperApp:
         popup = tk.Toplevel(self.root)
         popup.title("Welcome to UE/Unity Dumper")
         popup.configure(bg=BG)
-        popup.geometry("700x420")
-        popup.minsize(640, 380)
+        self._set_window_size(popup, 700, 420, min_width=640, min_height=380)
         popup.resizable(True, True)
 
         shell = tk.Frame(popup, bg=BG, padx=16, pady=16)
@@ -2310,8 +2346,7 @@ class DumperApp:
         popup = tk.Toplevel(self.root)
         popup.title("Latest Update Override")
         popup.configure(bg=BG)
-        popup.geometry("460x220")
-        popup.minsize(420, 200)
+        self._set_window_size(popup, 460, 220, min_width=420, min_height=200)
 
         shell = tk.Frame(popup, bg=BG, padx=14, pady=14)
         shell.pack(fill=tk.BOTH, expand=True)
@@ -2627,8 +2662,8 @@ class DumperApp:
         popup = tk.Toplevel(self.root)
         popup.title(title)
         popup.configure(bg=BG)
-        popup.geometry(size)
-        popup.minsize(520, 320)
+        base_width, base_height = (int(part) for part in str(size).lower().split("x", 1))
+        self._set_window_size(popup, base_width, base_height, min_width=520, min_height=320)
         popup.resizable(True, True)
 
         shell = tk.Frame(popup, bg=BG, padx=16, pady=16)
@@ -2670,8 +2705,7 @@ class DumperApp:
         popup = tk.Toplevel(self.root)
         popup.title("Webhook Settings")
         popup.configure(bg=BG)
-        popup.geometry("680x360")
-        popup.minsize(560, 320)
+        self._set_window_size(popup, 680, 360, min_width=560, min_height=320)
         popup.resizable(True, True)
 
         shell = tk.Frame(popup, bg=BG, padx=16, pady=16)
@@ -3453,7 +3487,11 @@ class DumperApp:
 
         state["accounts_layout_job"] = None
 
-        layout_width = max(container.winfo_width(), container.winfo_reqwidth())
+        layout_width = max(
+            int(state.get("accounts_viewport_width", 0) or 0),
+            container.winfo_width(),
+            container.winfo_reqwidth(),
+        )
         if layout_width <= 1:
             pending_job = state.get("accounts_layout_job")
             if pending_job:
@@ -3481,13 +3519,20 @@ class DumperApp:
             ).pack(anchor="w")
             return
 
-        card_gap = 8
-        card_min_width = 260
+        card_gap = self._ui_px(8, minimum=4)
+        card_min_width = self._ui_px(220, minimum=150)
         column_count = max(1, min(len(accounts), layout_width // (card_min_width + card_gap)))
         if column_count == 1 and len(accounts) > 1 and layout_width >= (card_min_width * 2):
             column_count = 2
-        for column in range(column_count):
-            container.grid_columnconfigure(column, weight=1, uniform="steam_accounts")
+        previous_columns = int(state.get("accounts_column_count", 0) or 0)
+        for column in range(max(previous_columns, column_count)):
+            active_column = column < column_count
+            container.grid_columnconfigure(
+                column,
+                weight=1 if active_column else 0,
+                uniform="steam_accounts" if active_column else "",
+            )
+        state["accounts_column_count"] = column_count
 
         for index, account in enumerate(accounts):
             selected = account.steamid == selected_steamid
@@ -3506,8 +3551,8 @@ class DumperApp:
                 bg=card_bg,
                 highlightbackground=border_color,
                 highlightthickness=1,
-                padx=10,
-                pady=8,
+                padx=self._ui_px(10, minimum=4),
+                pady=self._ui_px(8, minimum=3),
                 cursor="hand2",
             )
             row = index // column_count
@@ -3526,8 +3571,8 @@ class DumperApp:
                 font=FONT_UI_BOLD,
                 fg=FG,
                 bg=accent_bg,
-                padx=8,
-                pady=5,
+                padx=self._ui_px(8, minimum=4),
+                pady=self._ui_px(5, minimum=2),
             )
             avatar.pack(anchor="w")
 
@@ -3539,9 +3584,9 @@ class DumperApp:
                 bg=card_bg,
                 anchor="w",
                 justify=tk.LEFT,
-                wraplength=max(180, (layout_width // max(1, column_count)) - 40),
+                wraplength=max(self._ui_px(180, minimum=120), (layout_width // max(1, column_count)) - self._ui_px(40, minimum=20)),
             )
-            name_label.pack(anchor="w", pady=(8, 2))
+            name_label.pack(anchor="w", pady=(self._ui_px(8, minimum=2), self._ui_px(2, minimum=1)))
 
             subtitle_label = tk.Label(
                 card,
@@ -3551,7 +3596,7 @@ class DumperApp:
                 bg=card_bg,
                 anchor="w",
                 justify=tk.LEFT,
-                wraplength=max(180, (layout_width // max(1, column_count)) - 40),
+                wraplength=max(self._ui_px(180, minimum=120), (layout_width // max(1, column_count)) - self._ui_px(40, minimum=20)),
             )
             subtitle_label.pack(anchor="w")
 
@@ -3563,12 +3608,12 @@ class DumperApp:
                 bg=card_bg,
                 anchor="w",
             )
-            steamid_label.pack(anchor="w", pady=(6, 0))
+            steamid_label.pack(anchor="w", pady=(self._ui_px(6, minimum=2), 0))
             make_gradient_rule(
                 card,
                 (accent_bg if selected else BORDER, ACCENT if selected else OVERLAY, BORDER),
                 height=2,
-            ).pack(fill=tk.X, pady=(10, 0))
+            ).pack(fill=tk.X, pady=(self._ui_px(10, minimum=3), 0))
 
             def _bind_click(widget, target_steamid: str = account.steamid):
                 widget.bind("<Button-1>", lambda _event, sid=target_steamid: self._select_steam_account(state, sid))
@@ -4394,8 +4439,41 @@ class DumperApp:
             bg=BG_CARD,
         ).pack(side=tk.LEFT)
 
-        accounts_container = tk.Frame(controls_card, bg=BG_CARD)
-        accounts_container.pack(fill=tk.X, pady=(6, 0))
+        accounts_shell = tk.Frame(
+            controls_card,
+            bg="#141c28",
+            highlightbackground="#1e2a36",
+            highlightthickness=1,
+            height=self._ui_px(208, minimum=148),
+        )
+        accounts_shell.pack(fill=tk.X, pady=(6, 0))
+        accounts_shell.pack_propagate(False)
+
+        accounts_canvas = tk.Canvas(
+            accounts_shell,
+            bg=BG_CARD,
+            bd=0,
+            highlightthickness=0,
+            relief=tk.FLAT,
+        )
+        accounts_scroll = make_scrollbar(accounts_shell, accounts_canvas.yview, width=10, min_thumb=36)
+        accounts_canvas.configure(yscrollcommand=accounts_scroll.set)
+        accounts_canvas.pack(
+            side=tk.LEFT,
+            fill=tk.BOTH,
+            expand=True,
+            padx=(self._ui_px(4, minimum=2), 0),
+            pady=self._ui_px(4, minimum=2),
+        )
+        accounts_scroll.pack(
+            side=tk.RIGHT,
+            fill=tk.Y,
+            padx=(0, self._ui_px(4, minimum=2)),
+            pady=self._ui_px(4, minimum=2),
+        )
+
+        accounts_container = tk.Frame(accounts_canvas, bg=BG_CARD)
+        accounts_window = accounts_canvas.create_window((0, 0), window=accounts_container, anchor="nw")
 
         config_row = tk.Frame(controls_card, bg=BG_CARD)
         config_row.pack(fill=tk.X, pady=(8, 0))
@@ -4418,6 +4496,7 @@ class DumperApp:
             "selected_game": None,
             "summary_values": {},
             "accounts_container": accounts_container,
+            "accounts_canvas": accounts_canvas,
             "accounts": [],
             "accounts_signature": (),
             "steam_running": False,
@@ -4427,6 +4506,19 @@ class DumperApp:
             "sort_column": "support",
             "sort_desc": False,
         }
+
+        def _sync_accounts_scrollregion(_event=None):
+            if not accounts_canvas.winfo_exists():
+                return
+            bbox = accounts_canvas.bbox("all")
+            accounts_canvas.configure(scrollregion=bbox or (0, 0, 0, 0))
+
+        def _sync_accounts_width(event):
+            viewport_width = max(1, int(event.width))
+            accounts_canvas.itemconfigure(accounts_window, width=viewport_width)
+            state["accounts_viewport_width"] = viewport_width
+            _sync_accounts_scrollregion()
+            self._queue_steam_account_card_render(state, viewport_width)
 
         refresh_btn = _make_button(
             config_actions, "Refresh", lambda: self._refresh_steam_audit_context(state), style="ghost",
@@ -4461,7 +4553,12 @@ class DumperApp:
         self._steam_audit_state = state
         accounts_container.bind(
             "<Configure>",
-            lambda event: self._queue_steam_account_card_render(state, event.width),
+            _sync_accounts_scrollregion,
+            add="+",
+        )
+        accounts_canvas.bind(
+            "<Configure>",
+            _sync_accounts_width,
             add="+",
         )
         self._update_steam_audit_controls(state)
@@ -4541,10 +4638,15 @@ class DumperApp:
                 bg=pill_bg,
                 highlightbackground="#222c38",
                 highlightthickness=1,
-                padx=12,
-                pady=8,
+                padx=self._ui_px(12, minimum=4),
+                pady=self._ui_px(8, minimum=3),
             )
-            pill.grid(row=0, column=column, sticky="nsew", padx=(0, 4 if column < len(summary_specs) - 1 else 0))
+            pill.grid(
+                row=0,
+                column=column,
+                sticky="nsew",
+                padx=(0, self._ui_px(4, minimum=2) if column < len(summary_specs) - 1 else 0),
+            )
             summary_row.grid_columnconfigure(column, weight=1)
             value_var = tk.StringVar(value="--")
             tk.Label(
@@ -4586,12 +4688,12 @@ class DumperApp:
             style="SteamAudit.Treeview",
             height=16,
         )
-        tree.column("name", width=240, minwidth=180, anchor="w", stretch=True)
-        tree.column("scope", width=80, minwidth=70, anchor="center", stretch=False)
-        tree.column("source", width=110, minwidth=90, anchor="center", stretch=False)
-        tree.column("engine", width=150, minwidth=120, anchor="w", stretch=False)
-        tree.column("support", width=155, minwidth=130, anchor="w", stretch=False)
-        tree.column("anti_cheat", width=180, minwidth=140, anchor="w", stretch=True)
+        tree.column("name", width=self._ui_px(240, minimum=180), minwidth=self._ui_px(180, minimum=120), anchor="w", stretch=True)
+        tree.column("scope", width=self._ui_px(80, minimum=70), minwidth=self._ui_px(70, minimum=60), anchor="center", stretch=False)
+        tree.column("source", width=self._ui_px(110, minimum=90), minwidth=self._ui_px(90, minimum=70), anchor="center", stretch=False)
+        tree.column("engine", width=self._ui_px(150, minimum=120), minwidth=self._ui_px(120, minimum=90), anchor="w", stretch=False)
+        tree.column("support", width=self._ui_px(155, minimum=130), minwidth=self._ui_px(130, minimum=100), anchor="w", stretch=False)
+        tree.column("anti_cheat", width=self._ui_px(180, minimum=140), minwidth=self._ui_px(140, minimum=110), anchor="w", stretch=True)
 
         tree_scroll = make_scrollbar(tree_shell, tree.yview, width=12, min_thumb=48)
         tree.configure(yscrollcommand=tree_scroll.set)
@@ -4607,7 +4709,7 @@ class DumperApp:
 
         detail_card = _make_card(shell, pady=10)
         detail_card.pack(fill=tk.BOTH, expand=False, pady=(0, 0))
-        detail_card.configure(height=220)
+        detail_card.configure(height=self._ui_px(220, minimum=160))
         detail_card.pack_propagate(False)
 
         detail_header = tk.Frame(detail_card, bg=BG_CARD)
@@ -4840,14 +4942,10 @@ class DumperApp:
 
         picker = tk.Toplevel(self.root)
         picker.title("Template Mode")
-        picker.geometry("420x300")
         picker.configure(bg=BG)
         picker.transient(self.root)
         picker.grab_set()
-
-        x = self.root.winfo_x() + (self.root.winfo_width() // 2) - 210
-        y = self.root.winfo_y() + (self.root.winfo_height() // 2) - 150
-        picker.geometry(f"+{x}+{y}")
+        self._center_popup(picker, 420, 300)
 
         tk.Label(
             picker, text="Choose Template Mode",
@@ -5053,7 +5151,7 @@ class DumperApp:
             popup = tk.Toplevel(self.root)
             popup.title("Health Report")
             popup.configure(bg=BG)
-            popup.geometry("580x360")
+            self._set_window_size(popup, 580, 360)
             popup.resizable(True, True)
 
             txt = scrolledtext.ScrolledText(
@@ -5090,14 +5188,10 @@ class DumperApp:
 
         picker = tk.Toplevel(self.root)
         picker.title("Select Running Game")
-        picker.geometry("380x480")
         picker.configure(bg=BG)
         picker.transient(self.root)
         picker.grab_set()
-
-        x = self.root.winfo_x() + (self.root.winfo_width() // 2) - 190
-        y = self.root.winfo_y() + (self.root.winfo_height() // 2) - 240
-        picker.geometry(f"+{x}+{y}")
+        self._center_popup(picker, 380, 480)
 
         search_var = tk.StringVar()
 

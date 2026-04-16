@@ -49,12 +49,30 @@ BUTTON_STYLES = {
     "secondary": {"bg": "#2a3643", "fg": FG, "hover": "#324252", "active": "#3f5368"},
 }
 
-def _scaled_px(scale, value, minimum=1):
+_UI_SCALE = 1.0
+
+def set_ui_scale(scale: float):
+    global _UI_SCALE
     try:
         factor = float(scale)
     except (TypeError, ValueError):
         factor = 1.0
+    _UI_SCALE = max(0.8, min(2.0, round(factor, 2)))
+
+def get_ui_scale() -> float:
+    return _UI_SCALE
+
+def _scaled_px(scale, value, minimum=1):
+    try:
+        factor = _UI_SCALE if scale is None else float(scale)
+    except (TypeError, ValueError):
+        factor = 1.0
     return max(minimum, int(round(float(value) * max(0.8, factor))))
+
+def _scaled_padding(value, scale=None):
+    if isinstance(value, (tuple, list)):
+        return tuple(_scaled_px(scale, item, minimum=0) for item in value)
+    return _scaled_px(scale, value, minimum=0)
 
 def _rounded_points(x1, y1, x2, y2, radius):
     radius = max(0, min(radius, int((x2 - x1) / 2), int((y2 - y1) / 2)))
@@ -91,16 +109,17 @@ def _rgb_to_hex(rgb):
 class GradientRule(tk.Canvas):
 
     def __init__(self, parent, colors, height=2):
+        scaled_height = _scaled_px(None, height)
         super().__init__(
             parent,
             bg=parent.cget("bg"),
-            height=height,
+            height=scaled_height,
             bd=0,
             highlightthickness=0,
             relief=tk.FLAT,
         )
         self._colors = list(colors)
-        self._height = height
+        self._height = scaled_height
         self.bind("<Configure>", lambda _event: self._draw())
         self._draw()
 
@@ -134,10 +153,10 @@ class PillButton(tk.Frame):
         self._style_name = style
         self._palette = BUTTON_STYLES.get(style, BUTTON_STYLES["primary"]).copy()
         self._font = tkfont.Font(font=font or FONT_UI_BOLD)
-        self._padx = padx
-        self._pady = pady
-        self._radius = radius
-        self._min_width = min_width
+        self._padx = _scaled_px(None, padx, minimum=0)
+        self._pady = _scaled_px(None, pady, minimum=0)
+        self._radius = _scaled_px(None, radius, minimum=0)
+        self._min_width = _scaled_px(None, min_width, minimum=0)
         self._state = tk.NORMAL
         self._bg_override = None
         self._fg_override = None
@@ -270,7 +289,8 @@ class PillButton(tk.Frame):
 class MinimalScrollbar(tk.Canvas):
 
     def __init__(self, parent, command=None, orient=tk.VERTICAL, width=14, min_thumb=34):
-        dimension_kwargs = {"width": width} if orient == tk.VERTICAL else {"height": width}
+        scaled_width = _scaled_px(None, width, minimum=8)
+        dimension_kwargs = {"width": scaled_width} if orient == tk.VERTICAL else {"height": scaled_width}
         super().__init__(
             parent,
             bg=BG_CARD,
@@ -286,7 +306,7 @@ class MinimalScrollbar(tk.Canvas):
         self._last = 1.0
         self._drag_offset = None
         self._hover = False
-        self._min_thumb = max(28, int(min_thumb))
+        self._min_thumb = _scaled_px(None, min_thumb, minimum=28)
 
         self.bind("<Configure>", lambda _e: self._draw())
         self.bind("<Button-1>", self._on_press)
@@ -416,8 +436,8 @@ def make_card(parent, **kwargs):
         bd=0,
         highlightbackground=BORDER,
         highlightthickness=1,
-        padx=kwargs.get("padx", 16),
-        pady=kwargs.get("pady", 12),
+        padx=_scaled_px(None, kwargs.get("padx", 16), minimum=0),
+        pady=_scaled_px(None, kwargs.get("pady", 12), minimum=0),
     )
 
 def make_gradient_rule(parent, colors, height=2):
@@ -458,6 +478,13 @@ class MinimalDropdown(tk.Frame):
         self._virtual_handler = None
         self._popup = None
         self._listbox = None
+        width_px = _scaled_px(None, width, minimum=90)
+        label_padx = _scaled_px(None, 10, minimum=4)
+        label_pady = _scaled_px(None, 5, minimum=2)
+        arrow_padx = _scaled_px(None, 8, minimum=3)
+        popup_margin = _scaled_px(None, 4, minimum=2)
+        self._popup_margin = popup_margin
+        self._popup_row_height = _scaled_px(None, 24, minimum=18)
 
         self._label = tk.Label(
             self,
@@ -466,9 +493,9 @@ class MinimalDropdown(tk.Frame):
             fg=FG,
             font=font or FONT_MONO_SM,
             anchor="w",
-            padx=10,
-            pady=5,
-            width=max(6, width // 10),
+            padx=label_padx,
+            pady=label_pady,
+            width=max(6, width_px // max(8, _scaled_px(None, 10, minimum=8))),
         )
         self._label.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
@@ -478,8 +505,8 @@ class MinimalDropdown(tk.Frame):
             bg=BG_INPUT,
             fg=FG_DIM,
             font=FONT_UI_SM,
-            padx=8,
-            pady=5,
+            padx=arrow_padx,
+            pady=label_pady,
             cursor="hand2",
         )
         self._arrow.pack(side=tk.RIGHT)
@@ -522,17 +549,22 @@ class MinimalDropdown(tk.Frame):
         popup.attributes("-topmost", True)
 
         x = self.winfo_rootx()
-        y = self.winfo_rooty() + self.winfo_height() + 4
-        width = max(self.winfo_width(), 160)
+        y = self.winfo_rooty() + self.winfo_height() + self._popup_margin
+        width = max(self.winfo_width(), _scaled_px(None, 160, minimum=120))
         visible_rows = min(max(len(self.values), 1), 8)
-        height = visible_rows * 24 + 6
+        height = visible_rows * self._popup_row_height + _scaled_px(None, 6, minimum=4)
         popup.geometry(f"{width}x{height}+{x}+{y}")
 
         shell = tk.Frame(popup, bg=BG_CARD, highlightbackground=BORDER, highlightthickness=1)
         shell.pack(fill=tk.BOTH, expand=True)
 
         list_frame = tk.Frame(shell, bg=BG_CARD)
-        list_frame.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+        list_frame.pack(
+            fill=tk.BOTH,
+            expand=True,
+            padx=_scaled_px(None, 2, minimum=0),
+            pady=_scaled_px(None, 2, minimum=0),
+        )
 
         listbox = tk.Listbox(
             list_frame,
