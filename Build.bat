@@ -135,7 +135,10 @@ echo.
 "%MSBUILD%" kdmapper\kdmapper.sln /p:Configuration=Release /p:Platform=x64 /v:minimal /nologo
 echo.
 
-if exist "kdmapper\x64\Release\kdmapper.exe" (
+if exist "kdmapper\x64\Release\kdmapper_Release.exe" (
+    copy /y "kdmapper\x64\Release\kdmapper_Release.exe" "bin\kdmapper.exe" >nul
+    echo   [ OK ]  bin\kdmapper.exe
+) else if exist "kdmapper\x64\Release\kdmapper.exe" (
     copy /y "kdmapper\x64\Release\kdmapper.exe" "bin\kdmapper.exe" >nul
     echo   [ OK ]  bin\kdmapper.exe
 ) else (
