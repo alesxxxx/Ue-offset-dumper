@@ -1257,6 +1257,16 @@ class DumperApp:
                 self._log(
                     "[Kernel] To fix driver issues, rebuild wdfsvc64.sys with Visual Studio.", "warn"
                 )
+                try:
+                    from src.core.debug import get_log_path
+                    _log_path = get_log_path()
+                    if _log_path:
+                        self._log(
+                            f"[Kernel] See dumper_debug.log for section-enumeration "
+                            f"diagnostics: {_log_path}", "dim"
+                        )
+                except Exception:
+                    pass
         else:
             set_driver_mode(False)
             self._log("[Kernel] Driver mode disabled — using standard Win32 ReadProcessMemory.", "info")
@@ -1306,7 +1316,42 @@ class DumperApp:
                 capture_output=True, text=True, timeout=30,
             )
             if result.returncode == 0:
-                self._log(f"[BYOVD] {mapper_name} finished successfully.", "ok")
+                combined_stdout = (result.stdout or "") + (result.stderr or "")
+                import re as _re
+                m = _re.search(r"DriverEntry returned\s+0x([0-9a-fA-F]+)", combined_stdout)
+                if m:
+                    entry_status = int(m.group(1), 16) & 0xFFFFFFFF
+                    if entry_status != 0:
+                        self._log(
+                            f"[BYOVD] {mapper_name} mapped the driver, but DriverEntry "
+                            f"returned NTSTATUS 0x{entry_status:08X} — driver did not "
+                            f"initialize.", "err"
+                        )
+                        _hint = {
+                            0xC0000034: "STATUS_OBJECT_PATH_NOT_FOUND — the shared "
+                                        "section path failed to resolve from kernel mode.",
+                            0xC0000035: "STATUS_OBJECT_NAME_COLLISION — another "
+                                        "driver instance may already be loaded.",
+                            0xC0000022: "STATUS_ACCESS_DENIED — an anti-cheat / AV "
+                                        "is blocking kernel-mode object creation.",
+                            0xC000009A: "STATUS_INSUFFICIENT_RESOURCES — pool "
+                                        "allocation failed inside DriverEntry.",
+                        }.get(entry_status)
+                        if _hint:
+                            self._log(f"  {_hint}", "warn")
+                        for line in combined_stdout.strip().splitlines()[-6:]:
+                            self._log(f"  {line}", "dim")
+                        return False
+                    else:
+                        self._log(
+                            f"[BYOVD] {mapper_name} finished successfully "
+                            f"(DriverEntry -> 0x00000000).", "ok"
+                        )
+                else:
+                    self._log(
+                        f"[BYOVD] {mapper_name} finished but did not report a "
+                        f"DriverEntry status — assuming success.", "warn"
+                    )
                 import time
                 time.sleep(1)
                 return True

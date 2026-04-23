@@ -244,8 +244,13 @@ def _discover_section_name() -> str | None:
 
         found_name = None
         first_call = True
+        iteration = 0
+        total_entries = 0
+        total_sections = 0
+        sample_sections = []
 
         while True:
+            iteration += 1
             status = _ntdll.NtQueryDirectoryObject(
                 dir_handle,
                 buf,
@@ -256,12 +261,25 @@ def _discover_section_name() -> str | None:
                 ctypes.byref(return_length),
             )
             first_call = False
+            status_u32 = status & 0xFFFFFFFF
+            dbg(
+                "_discover_section_name: NtQueryDirectoryObject iter=%d status=0x%08X return_length=%d",
+                iteration, status_u32, return_length.value,
+            )
 
-            if status != 0:
+            STATUS_SUCCESS = 0x00000000
+            STATUS_MORE_ENTRIES = 0x00000105
+
+            if status_u32 & 0x80000000:
+                break
+            if status_u32 not in (STATUS_SUCCESS, STATUS_MORE_ENTRIES):
+                break
+            if return_length.value == 0:
                 break
 
             offset = 0
-            while offset < return_length.value:
+            entry_size = ctypes.sizeof(OBJECT_DIRECTORY_INFORMATION)
+            while offset + entry_size <= return_length.value:
                 entry = ctypes.cast(
                     ctypes.byref(buf, offset),
                     ctypes.POINTER(OBJECT_DIRECTORY_INFORMATION)
@@ -270,8 +288,14 @@ def _discover_section_name() -> str | None:
                 if entry.Name.Length == 0:
                     break
 
+                total_entries += 1
                 name = entry.Name.Buffer
                 type_name = entry.TypeName.Buffer
+
+                if type_name == "Section":
+                    total_sections += 1
+                    if name and len(sample_sections) < 20:
+                        sample_sections.append(name)
 
                 if (name and type_name and
                     type_name == "Section" and
@@ -280,11 +304,20 @@ def _discover_section_name() -> str | None:
                     dbg("_discover_section_name: Found section: %s", found_name)
                     break
 
-                entry_size = ctypes.sizeof(OBJECT_DIRECTORY_INFORMATION)
                 offset += entry_size
 
             if found_name:
                 break
+
+        dbg(
+            "_discover_section_name: enumerated %d entries, %d sections, found=%s",
+            total_entries, total_sections, found_name,
+        )
+        if not found_name and sample_sections:
+            dbg(
+                "_discover_section_name: sample section names: %s",
+                ", ".join(sample_sections),
+            )
 
         _ntdll.NtClose(dir_handle)
         return found_name
