@@ -105,7 +105,48 @@ if exist "bin\wdfsvc64.sys" (
 echo.
 
 echo   +------------------------------------------+
-echo   ^|  Step 2 / 3  --  Steam Ownership Helper ^|
+echo   ^|  Step 2 / 4  --  kdmapper (BYOVD)       ^|
+echo   +------------------------------------------+
+echo.
+
+where git >nul 2>nul
+if errorlevel 1 (
+    echo   [SKIP]  Git not found. Cannot clone kdmapper.
+    echo          Download kdmapper manually or install Git.
+    goto :skip_kdmapper
+)
+
+if not exist "kdmapper" (
+    echo   Cloning kdmapper repository...
+    git clone https://github.com/TheCruZ/kdmapper.git >nul 2>&1
+    if errorlevel 1 (
+        echo   [FAIL]  Could not clone kdmapper.
+        goto :skip_kdmapper
+    )
+) else (
+    echo   kdmapper repository found. Pulling latest...
+    cd kdmapper
+    git pull origin master >nul 2>&1
+    cd ..
+)
+
+echo   Compiling kdmapper\kdmapper.sln  ^(Release x64^)
+echo.
+"%MSBUILD%" kdmapper\kdmapper.sln /p:Configuration=Release /p:Platform=x64 /v:minimal /nologo
+echo.
+
+if exist "kdmapper\x64\Release\kdmapper.exe" (
+    copy /y "kdmapper\x64\Release\kdmapper.exe" "bin\kdmapper.exe" >nul
+    echo   [ OK ]  bin\kdmapper.exe
+) else (
+    echo   [FAIL]  kdmapper.exe could not be built.
+)
+
+:skip_kdmapper
+echo.
+
+echo   +------------------------------------------+
+echo   ^|  Step 3 / 4  --  Steam Ownership Helper ^|
 echo   +------------------------------------------+
 echo.
 
@@ -135,7 +176,7 @@ if errorlevel 1 (
 echo.
 
 echo   +------------------------------------------+
-echo   ^|  Step 3 / 3  --  Dumper.exe             ^|
+echo   ^|  Step 4 / 4  --  Dumper.exe             ^|
 echo   +------------------------------------------+
 echo.
 
@@ -185,6 +226,12 @@ if exist "bin\wdfsvc64.sys" (
     echo   [ OK ]  bin\wdfsvc64.sys
 ) else (
     echo   [----]  bin\wdfsvc64.sys       [not built -- install VS + WDK if needed]
+)
+
+if exist "bin\kdmapper.exe" (
+    echo   [ OK ]  bin\kdmapper.exe
+) else (
+    echo   [SKIP]  bin\kdmapper.exe       [not built -- install Git + VS to build automatically]
 )
 
 if exist "bin\SteamLoginHelper.exe" (
