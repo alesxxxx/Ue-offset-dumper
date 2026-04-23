@@ -397,7 +397,7 @@ Examples:
         """,
     )
     parser.add_argument("--process", "-p", required=False, help="Game process name")
-    parser.add_argument("--engine", "-e", choices=["ue", "il2cpp", "mono", "source"], default="ue",
+    parser.add_argument("--engine", "-e", choices=["ue", "il2cpp", "mono", "source", "source2"], default="ue",
                         help="Engine type (default: ue)")
     parser.add_argument("--steam-audit", action="store_true",
                         help="Scan Steam libraries and classify likely dump targets")
@@ -496,6 +496,10 @@ Examples:
 
     if args.engine == "mono":
         return _run_mono(args)
+
+    if args.engine == "source2":
+        from src.ui.cli_source2 import _run_source2
+        return _run_source2(args)
 
     if args.engine == "ue":
         from src.engines.ue.detector import detect_engine_full as _det
