@@ -1,7 +1,7 @@
 import logging
 from typing import Callable, Optional, Dict
 
-from src.core.memory import read_u64, read_u32, read_string, read_u16, read_u8, get_module_info, get_pid_by_name
+from src.core.memory import read_uint64, read_uint32, read_string, read_uint16, read_bytes, get_module_info, get_pid_by_name
 from src.core.models import SDKDump, StructInfo, MemberInfo
 from src.engines.source2.parser import get_type_scope_classes
 
@@ -40,7 +40,7 @@ def dump_source2(
     if not schema_sys_ptr:
         raise RuntimeError("Could not find CSchemaSystem pointer.")
 
-    schema_sys = read_u64(handle, schema_sys_ptr)
+    schema_sys = read_uint64(handle, schema_sys_ptr)
     if not schema_sys:
         raise RuntimeError("Could not dereference CSchemaSystem.")
 
@@ -51,8 +51,8 @@ def dump_source2(
 
     # SchemaSystemTypeScopes are at +0x190 in CSchemaSystem 
     # CUtlVector type_scopes
-    scopes_size = read_u32(handle, schema_sys + 0x190 + 0x10) # m_Size
-    scopes_data = read_u64(handle, schema_sys + 0x190 + 0x0)  # m_Memory
+    scopes_size = read_uint32(handle, schema_sys + 0x190 + 0x10) # m_Size
+    scopes_data = read_uint64(handle, schema_sys + 0x190 + 0x0)  # m_Memory
     
     if scopes_size == 0 or not scopes_data:
         raise RuntimeError("No type scopes found in schema system.")
@@ -64,12 +64,12 @@ def dump_source2(
 
     for i in range(scopes_size):
         # Array of pointers to CSchemaSystemTypeScope
-        scope_ptr = read_u64(handle, scopes_data + (i * 8))
+        scope_ptr = read_uint64(handle, scopes_data + (i * 8))
         if not scope_ptr:
             continue
             
         scope_name_ptr = scope_ptr + 0x8 
-        scope_name = read_string(handle, scope_name_ptr, size=256)
+        scope_name = read_string(handle, scope_name_ptr, max_len=256)
         
         # Only dump client.dll types for this typical dumper
         if scope_name != "client.dll":
@@ -82,37 +82,37 @@ def dump_source2(
         
         for class_ptr in classes_ptrs:
             # Parse SchemaClassInfoData
-            class_name_ptr = read_u64(handle, class_ptr + 0x8)
+            class_name_ptr = read_uint64(handle, class_ptr + 0x8)
             class_name = read_string(handle, class_name_ptr)
             
             # base class
-            base_class_ptr = read_u64(handle, class_ptr + 0x40)
+            base_class_ptr = read_uint64(handle, class_ptr + 0x40)
             base_class_name = ""
             if base_class_ptr:
-                b_info = read_u64(handle, base_class_ptr + 0x8) # ptr to SchemaClassInfoData
+                b_info = read_uint64(handle, base_class_ptr + 0x8) # ptr to SchemaClassInfoData
                 if b_info:
-                    b_name_ptr = read_u64(handle, b_info + 0x8)
+                    b_name_ptr = read_uint64(handle, b_info + 0x8)
                     base_class_name = read_string(handle, b_name_ptr)
 
-            fields_count = read_u16(handle, class_ptr + 0x24)
-            fields_ptr = read_u64(handle, class_ptr + 0x30)
+            fields_count = read_uint16(handle, class_ptr + 0x24)
+            fields_ptr = read_uint64(handle, class_ptr + 0x30)
             
             members = []
             for f in range(fields_count):
                 # SchemaClassFieldData_t size is 0x20
                 f_addr = fields_ptr + (f * 0x20)
                 
-                f_name_ptr = read_u64(handle, f_addr + 0x0)
+                f_name_ptr = read_uint64(handle, f_addr + 0x0)
                 f_name = read_string(handle, f_name_ptr)
                 
-                schema_type_ptr = read_u64(handle, f_addr + 0x8)
+                schema_type_ptr = read_uint64(handle, f_addr + 0x8)
                 type_name = "Unknown"
                 if schema_type_ptr:
                     # SchemaType_t : name is at +0x8
-                    t_name_ptr = read_u64(handle, schema_type_ptr + 0x8)
+                    t_name_ptr = read_uint64(handle, schema_type_ptr + 0x8)
                     type_name = read_string(handle, t_name_ptr)
                     
-                offset = read_u32(handle, f_addr + 0x10)
+                offset = read_uint32(handle, f_addr + 0x10)
                 
                 members.append(
                     MemberInfo(
@@ -132,7 +132,7 @@ def dump_source2(
                     name=class_name,
                     full_name=f"Source2.{scope_name}.{class_name}",
                     address=0,
-                    size=read_u32(handle, class_ptr + 0x20),
+                    size=read_uint32(handle, class_ptr + 0x20),
                     super_name=base_class_name,
                     is_class=True,
                     package=scope_name,

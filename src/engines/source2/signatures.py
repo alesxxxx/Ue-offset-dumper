@@ -1,7 +1,7 @@
 import logging
 from typing import Optional
 
-from src.core.memory import read_u32, read_u64, read_bytes
+from src.core.memory import read_uint32, read_uint64, read_bytes
 
 logger = logging.getLogger(__name__)
 

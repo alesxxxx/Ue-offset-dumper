@@ -1,7 +1,11 @@
 import logging
 from typing import Callable, Optional, Dict, List
 
-from src.core.memory import read_u64, read_u32, read_u16, read_u8, read_string
+from src.core.memory import read_uint64, read_uint32, read_uint16, read_bytes, read_string
+
+def _read_u8(handle: int, addr: int) -> int:
+    data = read_bytes(handle, addr, 1)
+    return data[0] if data else 0
 
 logger = logging.getLogger(__name__)
 
@@ -10,38 +14,22 @@ class CUtlTSHashParser:
         self.handle = handle
         self.address = address
         
-        # CUtlTSHash layout generally used in CS2:
-        # We have 256 list elements (buckets)
-        # 0x00: struct { m_pFirst, m_pFirstUncommited, m_uiAllocationCount, m_uiGrowSize, m_uiBlockSize, ... }
-        
-        # According to a2x/cs2-dumper utl_ts_hash.rs:
-        # UtlTsHash<T, 256> has:
-        # pub buckets: UtlMemoryPool;  (at 0x0 offset)
-        
-        # UtlMemoryPool layout:
-        # pub start_offset: i32
-        # pub bytes_per_blob: i32
-        # pub blob_count: i32
-        # pub peak_alloc: i32
-        # pub unallocated_size: i32
-        # pub base: Pointer64<[u8]>
-        
-        # In actual memory terms for CS2 UtlTsHash struct:
+        # CUtlMemoryPool layout (at the start of CUtlTSHash):
         # +0x0: unallocated_data (int)
         # +0x4: allocation_count (int)
         # +0x8: peak_allocation_count (int)
         # +0xC: block_size (int)
         # +0x10: pBlocks (Pointer64)
-        pass
+        self.m_uiBlockSize = read_uint32(handle, address + 0xC)
 
     def iter_elements(self, block_size: int = 0x10) -> List[int]:
         # Implementation via memory pool 
         elements = []
         
-        pool_unallocated_data = read_u32(self.handle, self.address + 0x0)
-        pool_allocation_count = read_u32(self.handle, self.address + 0x4)
-        pool_peak_alloc = read_u32(self.handle, self.address + 0x8)
-        pool_pBlocks = read_u64(self.handle, self.address + 0x10)
+        pool_unallocated_data = read_uint32(self.handle, self.address + 0x0)
+        pool_allocation_count = read_uint32(self.handle, self.address + 0x4)
+        pool_peak_alloc = read_uint32(self.handle, self.address + 0x8)
+        pool_pBlocks = read_uint64(self.handle, self.address + 0x10)
         
         if not pool_pBlocks or pool_allocation_count == 0:
             return elements
@@ -75,15 +63,15 @@ class CUtlTSHashParser:
                 
                 element_addr = data_ptr + (i * 0x18) 
                 # ^ Assuming 0x18 stride. However, 0x20 is common. We'll read the data ptr anyway:
-                uiKey = read_u64(self.handle, element_addr)
+                uiKey = read_uint64(self.handle, element_addr)
                 # Next element ptr is used for collision. If we read the blob arrays, we don't need to walk pNext for the same bucket.
                 
                 # Check active
-                obj_ptr = read_u64(self.handle, element_addr + 0x10)
+                obj_ptr = read_uint64(self.handle, element_addr + 0x10)
                 if obj_ptr:
                     elements.append(obj_ptr)
             
-            block_ptr = read_u64(self.handle, block_ptr + 0x0) # pNext
+            block_ptr = read_uint64(self.handle, block_ptr + 0x0) # pNext
         
         return elements
 
