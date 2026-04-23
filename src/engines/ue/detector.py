@@ -315,6 +315,21 @@ def detect_engine_full(
 
         is_source_process = process_name.lower() in _source_procs
         has_client_dll = bool(get_module_base(pid, "client.dll"))
+        has_schemasystem_dll = bool(get_module_base(pid, "schemasystem.dll"))
+
+        if has_schemasystem_dll or process_name.lower() == "cs2.exe":
+            return {
+                "engine": "source2",
+                "version": "",
+                "confidence": "high",
+                "method": "source2_module_detect",
+                "details": {
+                    "hint": f"Source 2 Schema System detected",
+                    "game_name": "Counter-Strike 2" if process_name.lower() == "cs2.exe" else "Unknown Source 2 Game",
+                    "is_64bit": True,
+                    "client_module": "client.dll",
+                },
+            }
 
         if is_source_process or has_client_dll:
             game = identify_game(process_name)

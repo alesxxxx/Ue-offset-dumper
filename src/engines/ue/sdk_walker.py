@@ -169,6 +169,13 @@ def _align_up(value: int, alignment: int) -> int:
 def _sanitize_signature_type(text: str) -> str:
     return (text or "void").replace("class ", "").replace("struct ", "").strip()
 
+def _normalize_ue_full_name(text: str) -> str:
+    value = str(text or "").replace("\\", "/").strip()
+    value = value.replace("/Script/", "")
+    while value.startswith("."):
+        value = value[1:]
+    return value
+
 def _ctz8(value: int) -> int:
     value &= 0xFF
     if value == 0:
@@ -227,7 +234,7 @@ def _cached_full_object_name(
     outer_name = _cached_uobject_name(
         handle, outer_ptr, gnames_ptr, ue_version, case_preserving, legacy_names
     ) if outer_ptr else ""
-    return f"{outer_name}.{name}" if outer_name else name
+    return _normalize_ue_full_name(f"{outer_name}.{name}" if outer_name else name)
 
 def _plausible_uobject_class_ptr(value: int) -> bool:
     return 0x1000000 < value < 0x7FFFFFFFFFFF
@@ -1010,7 +1017,7 @@ def walk_sdk(
                 preread_func_ptrs=phase_b_function_map.get(obj_ptr),
                 global_preread_function_info=preread_function_info_map,
             )
-            if info and info.members:
+            if info:
                 dump.structs.append(info)
 
         total_enums = max(1, len(enum_objs))
@@ -1199,6 +1206,7 @@ def _desc_alignment(desc: Optional[TypeDesc], size_hint: int = 0) -> int:
     return _type_align_from_display(_compute_desc_signature_name(desc), size_hint or desc.size)
 
 def _make_named_type_desc(kind: str, full_name: str, size: int = 0, align: int = 0) -> TypeDesc:
+    full_name = _normalize_ue_full_name(full_name)
     short_name = full_name.split(".")[-1] if full_name else ""
     package = full_name.split(".", 1)[0] if "." in full_name else ""
     return TypeDesc(
@@ -1556,6 +1564,9 @@ def _enrich_ue_dump_metadata(
     structs_by_full = {s.full_name: s for s in dump.structs if s.full_name}
     structs_by_addr = {s.address: s for s in dump.structs if s.address}
     enums_by_full = {e.full_name: e for e in dump.enums if e.full_name}
+    structs_by_name: Dict[str, List[StructInfo]] = {}
+    for struct_info in dump.structs:
+        structs_by_name.setdefault(struct_info.name, []).append(struct_info)
     enum_underlying: Dict[str, str] = {}
 
     def _apply_struct_desc_metadata(desc: Optional[TypeDesc]) -> None:
@@ -1577,10 +1588,9 @@ def _enrich_ue_dump_metadata(
         if super_ptr and super_ptr in structs_by_addr:
             struct_info.super_full_name = structs_by_addr[super_ptr].full_name
         elif struct_info.super_name:
-            for candidate in dump.structs:
-                if candidate.name == struct_info.super_name:
-                    struct_info.super_full_name = candidate.full_name
-                    break
+            matches = structs_by_name.get(struct_info.super_name, [])
+            if len(matches) == 1:
+                struct_info.super_full_name = matches[0].full_name
 
         for member in struct_info.members:
             if member.property_ptr:
@@ -1618,7 +1628,7 @@ def _enrich_ue_dump_metadata(
                 param.storage_offset = param.offset + (param.bool_meta.byte_offset if param.bool_meta else 0)
                 if param.type_desc:
                     param.type_desc.is_const = bool(param.flags & CPF_CONST_PARM)
-                    param.type_desc.is_ref = bool(param.flags & (CPF_REFERENCE_PARM | CPF_OUT_PARM))
+                    param.type_desc.is_ref = bool(param.flags & (CPF_REFERENCE_PARM | CPF_OUT_PARM)) and not bool(param.flags & CPF_RETURN_PARM)
                 _apply_struct_desc_metadata(param.type_desc)
                 if param.flags & CPF_RETURN_PARM:
                     func.return_param = param
@@ -1750,7 +1760,7 @@ def _walk_struct(
         if not name:
             return None
         outer_ptr = _s.unpack_from("<Q", _hdr, UOBJECT_OUTER)[0]
-        package = _cached_obj_name(outer_ptr) if outer_ptr else ""
+        package = _normalize_ue_full_name(_cached_obj_name(outer_ptr)) if outer_ptr else ""
         props_size = _s.unpack_from("<i", _hdr, props_size_off)[0]
         if props_size <= 0:
             return None
@@ -1763,7 +1773,7 @@ def _walk_struct(
         if not name:
             return None
         outer_ptr = read_uint64(handle, struct_ptr + UOBJECT_OUTER)
-        package = _cached_obj_name(outer_ptr) if outer_ptr else ""
+        package = _normalize_ue_full_name(_cached_obj_name(outer_ptr)) if outer_ptr else ""
         props_size = read_int32(handle, struct_ptr + props_size_off)
         if props_size <= 0:
             return None
@@ -1772,7 +1782,7 @@ def _walk_struct(
         child_ptr = None
         min_alignment = read_uint32(handle, struct_ptr + min_alignment_off)
 
-    full_name = f"{package}.{name}" if package else name
+    full_name = _normalize_ue_full_name(f"{package}.{name}" if package else name)
 
     _sc_next_off = USTRUCT_SUPER_LEGACY if pre_423 else USTRUCT_SUPER
     if super_ptr and super_ptr in _super_chain_cache:
@@ -1839,15 +1849,19 @@ def _walk_struct(
 
     _skip_prescan = preread_members is not None or preread_func_ptrs is not None
     if USE_DRIVER and not _skip_prescan:
-        from src.core.driver import read_memory_kernel
+        from src.core.driver import COMM_DATA_MAXSIZE, read_memory_kernel_ex
         from src.core.memory import TARGET_PID, _snapshot_pages
         page_size = 0x1000
 
         def _ensure_page_snapshotted(ptr, snapped_pages):
             page = ptr & ~(page_size - 1)
             if page not in snapped_pages and page not in _snapshot_pages:
-                data = read_memory_kernel(TARGET_PID, page, page_size)
-                if data:
+                result = read_memory_kernel_ex(TARGET_PID, page, page_size)
+                actual = result.actual_byte_count(page_size, COMM_DATA_MAXSIZE)
+                if actual:
+                    data = result.data
+                    if len(data) < page_size:
+                        data = data.ljust(page_size, b"\x00")
                     add_memory_snapshot(page, data)
                 snapped_pages.add(page)
 
@@ -2257,7 +2271,7 @@ def _walk_enum(
             legacy=legacy_names,
         )
 
-    full_name = f"{package}.{name}" if package else name
+    full_name = _normalize_ue_full_name(f"{package}.{name}" if package else name)
 
     info = EnumInfo(name=name, full_name=full_name, address=enum_ptr)
 

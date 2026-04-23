@@ -919,61 +919,6 @@ def _find_candidate_executables(game_dir: Path, max_depth: int = 4) -> List[Path
             continue
     return candidates
 
-def _extract_store_text(store_data: Optional[Dict[str, object]]) -> str:
-    if not store_data:
-        return ""
-    
-    text_parts = []
-    
-    fields_to_check = [
-        "name", "short_description", "detailed_description", 
-        "about_the_game", "developers", "publishers", "categories",
-        "genres", "tags", "type", "supported_languages"
-    ]
-    
-    for field in fields_to_check:
-        value = store_data.get(field)
-        if value:
-            if isinstance(value, list):
-                for item in value:
-                    if isinstance(item, dict):
-                        for sub_field in ["description", "name"]:
-                            sub_value = item.get(sub_field)
-                            if sub_value and isinstance(sub_value, str):
-                                text_parts.append(sub_value)
-                    elif isinstance(item, str):
-                        text_parts.append(item)
-            elif isinstance(value, dict):
-                for sub_field in ["description", "name", "english"]:
-                    sub_value = value.get(sub_field)
-                    if sub_value and isinstance(sub_value, str):
-                        text_parts.append(sub_value)
-            elif isinstance(value, str):
-                text_parts.append(value)
-    
-    requirements = store_data.get("pc_requirements", {})
-    if isinstance(requirements, dict):
-        for req_field in ["minimum", "recommended"]:
-            req_value = requirements.get(req_field)
-            if req_value and isinstance(req_value, str):
-                text_parts.append(req_value)
-    
-    metadata_fields = ["metacritic", "reviews", "dlc"]
-    for field in metadata_fields:
-        value = store_data.get(field)
-        if isinstance(value, dict):
-            for sub_value in value.values():
-                if isinstance(sub_value, str):
-                    text_parts.append(sub_value)
-        elif isinstance(value, list):
-            for item in value:
-                if isinstance(item, dict):
-                    for sub_value in item.values():
-                        if isinstance(sub_value, str):
-                            text_parts.append(sub_value)
-    
-    return " ".join(text_parts)
-
 def _executable_penalty(candidate: Path) -> int:
     lowered_name = candidate.name.lower()
     lowered_path = str(candidate).lower()

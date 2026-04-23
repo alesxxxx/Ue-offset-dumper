@@ -256,19 +256,20 @@ def snapshot_memory_ranges(
     driver_reader = None
     ctx = nullcontext()
     pid = TARGET_PID
+    driver_tolerant = False
+    driver_chunk_size = 0
 
     if USE_DRIVER:
         from src.core.driver import (
             bulk_read_mode,
-            read_memory_kernel,
-            read_memory_kernel_tolerant,
+            COMM_DATA_MAXSIZE,
+            read_memory_kernel_ex,
             supports_tolerant_bulk_read,
         )
 
-        if tolerant and supports_tolerant_bulk_read():
-            driver_reader = read_memory_kernel_tolerant
-        else:
-            driver_reader = read_memory_kernel
+        driver_reader = read_memory_kernel_ex
+        driver_tolerant = bool(tolerant and supports_tolerant_bulk_read())
+        driver_chunk_size = COMM_DATA_MAXSIZE
         ctx = bulk_read_mode()
 
     with ctx:
@@ -277,10 +278,12 @@ def snapshot_memory_ranges(
             if size <= 0:
                 continue
             if driver_reader is not None:
-                data = driver_reader(pid, start, size)
+                result = driver_reader(pid, start, size, tolerant=driver_tolerant)
+                data = result.data
+                actual = result.actual_byte_count(size, driver_chunk_size)
             else:
                 data = read_bytes(handle, start, size)
-            actual = len(data)
+                actual = len(data)
             if actual == 0:
                 continue
             if actual < size:
@@ -299,7 +302,7 @@ def snapshot_memory_ranges(
                     "actual": actual,
                     "filled_pct": actual * 100 // max(size, 1),
                     "nonzero_pct": sample_nonzero * 100 // sample_total,
-                    "tolerant": bool(tolerant and driver_reader is not None and actual == size),
+                    "tolerant": bool(driver_tolerant and driver_reader is not None and actual == size),
                 }
             )
 

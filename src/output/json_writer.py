@@ -470,6 +470,110 @@ def write_structs_json_v2(path: str, dump: SDKDump):
     structs = [s for s in dump.structs if not s.is_class]
     _write_structs_file_v2(path, structs)
 
+def _primitive_type_desc(display_name: str, size: int, align: int) -> TypeDesc:
+    return TypeDesc(
+        kind="primitive",
+        display_name=display_name,
+        signature_name=display_name,
+        size=int(size or 0),
+        align=int(align or 0),
+    )
+
+def _fallback_type_desc(property_class: str, size_hint: int = 0) -> Optional[TypeDesc]:
+    property_class = str(property_class or "")
+    size_hint = int(size_hint or 0)
+
+    primitive_map = {
+        "BoolProperty": ("bool", 1, 1),
+        "ByteProperty": ("uint8_t", 1, 1),
+        "Int8Property": ("int8_t", 1, 1),
+        "Int16Property": ("int16_t", 2, 2),
+        "IntProperty": ("int32_t", 4, 4),
+        "Int64Property": ("int64_t", 8, 8),
+        "UInt16Property": ("uint16_t", 2, 2),
+        "UInt32Property": ("uint32_t", 4, 4),
+        "UInt64Property": ("uint64_t", 8, 8),
+        "FloatProperty": ("float", 4, 4),
+        "DoubleProperty": ("double", 8, 8),
+        "NameProperty": ("FName", 0x8, 0x4),
+        "StrProperty": ("FString", 0x10, 0x8),
+        "TextProperty": ("FText", 0x18, 0x8),
+    }
+    if property_class in primitive_map:
+        display_name, size_value, align_value = primitive_map[property_class]
+        return _primitive_type_desc(display_name, size_value, align_value)
+
+    root_object = TypeDesc(
+        kind="named_struct",
+        display_name="Object",
+        signature_name="Object",
+        full_name="CoreUObject.Object",
+        package="CoreUObject",
+        size=0,
+        align=8,
+    )
+    if property_class == "EnumProperty":
+        integral = {1: "uint8_t", 2: "uint16_t", 4: "uint32_t", 8: "uint64_t"}.get(size_hint or 1, "uint8_t")
+        return _primitive_type_desc(integral, size_hint or 1, min(size_hint or 1, 8))
+    if property_class in {"ObjectProperty", "AssetObjectProperty"}:
+        return TypeDesc(kind="object", pointee=root_object, size=size_hint or 8, align=8)
+    if property_class == "ObjectPtrProperty":
+        return TypeDesc(kind="object_ptr", pointee=root_object, size=size_hint or 8, align=8)
+    if property_class == "ClassProperty":
+        return TypeDesc(kind="class", pointee=root_object, size=size_hint or 8, align=8)
+    if property_class == "ClassPtrProperty":
+        return TypeDesc(kind="class_ptr", pointee=root_object, size=size_hint or 8, align=8)
+    if property_class in {"SoftClassProperty", "AssetClassProperty"}:
+        return TypeDesc(kind="soft_class", pointee=root_object, size=size_hint or 0x28, align=8)
+    if property_class == "SoftObjectProperty":
+        return TypeDesc(kind="soft_object", pointee=root_object, size=size_hint or 0x28, align=8)
+    if property_class == "WeakObjectProperty":
+        return TypeDesc(kind="weak_object", pointee=root_object, size=size_hint or 8, align=8)
+    if property_class == "LazyObjectProperty":
+        return TypeDesc(kind="lazy_object", pointee=root_object, size=size_hint or 8, align=8)
+    if property_class == "InterfaceProperty":
+        interface_root = TypeDesc(
+            kind="named_struct",
+            display_name="Interface",
+            signature_name="Interface",
+            full_name="CoreUObject.Interface",
+            package="CoreUObject",
+            size=0,
+            align=8,
+        )
+        return TypeDesc(kind="interface", pointee=interface_root, size=size_hint or 0x10, align=8)
+    if property_class == "ArrayProperty":
+        return TypeDesc(kind="array", inner=_primitive_type_desc("uint8_t", 1, 1), size=size_hint or 0x10, align=8)
+    if property_class == "SetProperty":
+        return TypeDesc(kind="set", inner=_primitive_type_desc("uint8_t", 1, 1), size=size_hint or 0x50, align=8)
+    if property_class == "MapProperty":
+        return TypeDesc(
+            kind="map",
+            key=_primitive_type_desc("uint8_t", 1, 1),
+            value=_primitive_type_desc("uint8_t", 1, 1),
+            size=size_hint or 0x50,
+            align=8,
+        )
+    if property_class == "DelegateProperty":
+        return TypeDesc(kind="delegate", display_name="FScriptDelegate", signature_name="FScriptDelegate", size=size_hint or 0x10, align=8)
+    if property_class in {
+        "MulticastDelegateProperty",
+        "MulticastInlineDelegateProperty",
+        "MulticastSparseDelegateProperty",
+    }:
+        return TypeDesc(
+            kind="multicast_delegate",
+            display_name="FMulticastScriptDelegate",
+            signature_name="FMulticastScriptDelegate",
+            size=size_hint or 0x10,
+            align=8,
+        )
+    if property_class == "FieldPathProperty":
+        return TypeDesc(kind="field_path", pointee=root_object, size=size_hint or 0x10, align=8)
+    if property_class == "StructProperty":
+        return TypeDesc(kind="opaque", display_name="uint8_t", signature_name="uint8_t", size=size_hint or 1, align=1)
+    return None
+
 def _type_desc_to_json(desc: Optional[TypeDesc]) -> Optional[dict]:
     if desc is None:
         return None
@@ -477,8 +581,8 @@ def _type_desc_to_json(desc: Optional[TypeDesc]) -> Optional[dict]:
         "kind": desc.kind,
         "display_name": desc.display_name,
         "signature_name": desc.signature_name or desc.display_name,
-        "full_name": desc.full_name,
-        "package": desc.package,
+        "full_name": (desc.full_name or "").replace("/Script/", ""),
+        "package": (desc.package or "").replace("/Script/", ""),
         "size": int(desc.size or 0),
         "align": int(desc.align or 0),
         "is_const": bool(desc.is_const),
@@ -531,7 +635,7 @@ def _qualifiers_from_flags(flags: int) -> dict:
         "param": bool(flags & 0x80),
     }
 
-def _param_signature_fragment(param) -> str:
+def _param_signature_fragment(param, *, for_return: bool = False) -> str:
     type_text = (
         param.type_desc.signature_name
         if getattr(param, "type_desc", None) and getattr(param.type_desc, "signature_name", "")
@@ -540,15 +644,17 @@ def _param_signature_fragment(param) -> str:
     quals = _qualifiers_from_flags(getattr(param, "flags", 0))
     if quals["const"] and not type_text.startswith("const "):
         type_text = f"const {type_text}"
-    if quals["ref"] or quals["out"]:
+    if not for_return and (quals["ref"] or quals["out"]):
         type_text = f"{type_text}&"
+    if for_return:
+        return type_text
     return f"{type_text} {param.name}"
 
 def _build_function_signature(func) -> str:
     return_param = getattr(func, "return_param", None)
     return_type = "void"
     if return_param is not None:
-        return_type = _param_signature_fragment(return_param).rsplit(" ", 1)[0]
+        return_type = _param_signature_fragment(return_param, for_return=True)
     params = [
         _param_signature_fragment(param)
         for param in getattr(func, "params", [])
@@ -577,7 +683,7 @@ def _write_structs_file_v2(path: str, items: list):
                     "array_dim": int(m.array_dim),
                     "flags": f"0x{int(m.flags):X}",
                     "property_class": m.type_name,
-                    "type": _type_desc_to_json(getattr(m, "type_desc", None)),
+                    "type": _type_desc_to_json(getattr(m, "type_desc", None) or _fallback_type_desc(m.type_name, m.size)),
                     "bool_meta": _bool_meta_to_json(getattr(m, "bool_meta", None)),
                 }
             )
@@ -595,7 +701,7 @@ def _write_structs_file_v2(path: str, items: list):
                         "flags": f"0x{int(p.flags):X}",
                         "qualifiers": _qualifiers_from_flags(getattr(p, "flags", 0)),
                         "property_class": p.type_name,
-                        "type": _type_desc_to_json(getattr(p, "type_desc", None)),
+                        "type": _type_desc_to_json(getattr(p, "type_desc", None) or _fallback_type_desc(p.type_name, p.size)),
                         "bool_meta": _bool_meta_to_json(getattr(p, "bool_meta", None)),
                     }
                 )
@@ -615,7 +721,7 @@ def _write_structs_file_v2(path: str, items: list):
                             "flags": f"0x{int(f.return_param.flags):X}",
                             "qualifiers": _qualifiers_from_flags(getattr(f.return_param, "flags", 0)),
                             "property_class": f.return_param.type_name,
-                            "type": _type_desc_to_json(getattr(f.return_param, "type_desc", None)),
+                            "type": _type_desc_to_json(getattr(f.return_param, "type_desc", None) or _fallback_type_desc(f.return_param.type_name, f.return_param.size)),
                             "bool_meta": _bool_meta_to_json(getattr(f.return_param, "bool_meta", None)),
                         }
                         if getattr(f, "return_param", None) is not None
@@ -645,7 +751,7 @@ def _write_structs_file_v2(path: str, items: list):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(output, f, indent=2)
 
-def _write_structs_file(path: str, items: list):
+def _build_legacy_struct_entries(items: list) -> list:
     data_list = []
     for s in items:
         entry = {}
@@ -671,7 +777,7 @@ def _write_structs_file(path: str, items: list):
             for p in f.params:
                 ptype = _property_type_to_cpp(p.type_name)
                 params.append([ptype, p.name, f"0x{p.flags:X}", p.size, p.offset])
-                
+
             func_entry = {
                 f.name: [["void", f"0x{f.flags:X}", f"0x{f.address:X}", params]]
             }
@@ -679,8 +785,10 @@ def _write_structs_file(path: str, items: list):
 
         entry[s.full_name.replace("/Script/", "")] = entry_data
         data_list.append(entry)
+    return data_list
 
-    output = {"data": data_list}
+def _write_structs_file(path: str, items: list):
+    output = {"data": _build_legacy_struct_entries(items)}
     with open(path, "w") as f:
         json.dump(output, f, separators=(",", ":"))
 
@@ -848,27 +956,19 @@ def write_all(
 ):
     os.makedirs(output_dir, exist_ok=True)
 
+    class_items = [s for s in dump.structs if s.is_class]
+    struct_items = [s for s in dump.structs if not s.is_class]
     classes_path = os.path.join(output_dir, "ClassesInfo.json")
+    structs_path = os.path.join(output_dir, "StructsInfo.json")
     write_classes_json(classes_path, dump)
-    write_structs_json(os.path.join(output_dir, "StructsInfo.json"), dump)
+    write_structs_json(structs_path, dump)
     write_enums_json(os.path.join(output_dir, "EnumsInfo.json"), dump)
     if engine == "ue":
         write_classes_json_v2(os.path.join(output_dir, "ClassesInfoV2.json"), dump)
         write_structs_json_v2(os.path.join(output_dir, "StructsInfoV2.json"), dump)
 
-    classes_data = []
-    structs_data = []
-    try:
-        with open(classes_path, "r", encoding="utf-8") as f:
-            classes_data = json.load(f).get("data", [])
-    except (OSError, json.JSONDecodeError):
-        pass
-    try:
-        structs_path = os.path.join(output_dir, "StructsInfo.json")
-        with open(structs_path, "r", encoding="utf-8") as f:
-            structs_data = json.load(f).get("data", [])
-    except (OSError, json.JSONDecodeError):
-        pass
+    classes_data = _build_legacy_struct_entries(class_items)
+    structs_data = _build_legacy_struct_entries(struct_items)
 
     write_offsets_json(
         os.path.join(output_dir, "OffsetsInfo.json"),

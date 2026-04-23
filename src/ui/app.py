@@ -645,6 +645,11 @@ class DumperApp:
                 "engine": "source",
                 "description": "Confirmed  |  Source Engine  |  netvar dump verified",
             },
+            "Counter-Strike 2": {
+                "process": "cs2.exe",
+                "engine": "source2",
+                "description": "Confirmed  |  Source 2 Engine  |  schema dump",
+            },
             "Rogue Company": {
                 "process": "RogueCompany-Win64-Shipping.exe",
                 "engine": "ue",
@@ -892,7 +897,7 @@ class DumperApp:
         self.engine_var = tk.StringVar(value="ue")
         self.engine_combo = MinimalDropdown(
             row2, self.engine_var,
-            values=["ue", "il2cpp", "mono", "source"],
+            values=["ue", "il2cpp", "mono", "source", "source2"],
             width=86, font=FONT_MONO_SM,
         )
         self.engine_combo.pack(side=tk.LEFT, padx=(0, 8))
@@ -4890,10 +4895,10 @@ class DumperApp:
         self.scan_btn.pack_forget()
         self.sdk_btn.pack_forget()
         
-        if engine in ("ue", "source"):
+        if engine in ("ue", "source", "source2"):
             self.scan_btn.pack(side=tk.LEFT, padx=(0, 6))
             
-        if engine != "source":
+        if engine not in ("source",):
             self.sdk_btn.pack(side=tk.LEFT, padx=(0, 6))
 
     def _copy_offset(self, key: str):
@@ -5314,6 +5319,9 @@ class DumperApp:
         if detected_engine == "r6s":
             self.engine_var.set("r6s")
             self.engine_combo.set("r6s")
+        elif detected_engine == "source2":
+            self.engine_var.set("source2")
+            self.engine_combo.set("source2")
         elif detected_engine == "source":
             self.engine_var.set("source")
             self.engine_combo.set("source")
@@ -5340,8 +5348,8 @@ class DumperApp:
         if self.scanning:
             return
         engine = self.engine_var.get()
-        if engine not in ("ue", "source"):
-            self._log("Offset scanning is only applicable to Unreal Engine or Source Engine.", "warn")
+        if engine not in ("ue", "source", "source2"):
+            self._log("Offset scanning is only applicable to Unreal Engine, Source, or Source 2.", "warn")
             return
         if not self.pid:
             self._detect_process()
@@ -5351,10 +5359,82 @@ class DumperApp:
         self.scanning = True
         self.scan_btn.configure(state=tk.DISABLED)
         self.sdk_btn.configure(state=tk.DISABLED)
-        if engine == "source":
+        if engine == "source2":
+            threading.Thread(target=self._run_source2_scan, daemon=True).start()
+        elif engine == "source":
             threading.Thread(target=self._run_source_scan, daemon=True).start()
         else:
             threading.Thread(target=self._run_offset_scan, daemon=True).start()
+
+    def _run_source2_scan(self):
+        try:
+            self._set_status("Source 2 schema scan...", ACCENT)
+            self._set_progress(10)
+            self._log("[Source2] Starting schema dump...", "info")
+
+            handle = attach(self.pid)
+            if not handle:
+                self._log("Could not attach to process.", "err")
+                self._set_status("Attach failed", RED)
+                return
+
+            self.handle = handle
+            try:
+                from src.engines.source2.dumper import dump_source2
+
+                output_dir = self.output_var.get()
+                os.makedirs(output_dir, exist_ok=True)
+
+                def _progress(msg):
+                    self._log(f"  {msg}", "dim")
+
+                self._set_progress(30)
+                sdk_dump = dump_source2(
+                    handle=handle,
+                    process_name=self.process_name,
+                    progress_callback=_progress,
+                    log_fn=lambda m: self._log(m, "info"),
+                )
+                self._set_progress(80)
+
+                from src.output.json_writer import write_all as s2_write_all
+                s2_write_all(
+                    output_dir,
+                    sdk_dump,
+                    0, 0, 0,
+                    process_name=self.process_name,
+                    engine="source2",
+                    pe_timestamp=0,
+                )
+
+                self._set_progress(100)
+                total_structs = len(sdk_dump.structs)
+                total_props = sum(len(s.members) for s in sdk_dump.structs)
+                self._log(f"[Source2] Done \u2014 {total_structs} structs, {total_props} fields", "ok")
+                self._log(f"  Saved to: {output_dir}", "ok")
+                self._set_status("Source 2 dump complete!", GREEN)
+                self._set_info("objects", f"{total_structs:,} structs", FG)
+
+                self._maybe_send_webhook_gui(
+                    process_name=self.process_name,
+                    engine="source2",
+                    output_dir=output_dir,
+                    structs_count=total_structs,
+                )
+
+            finally:
+                detach(handle)
+                if self.handle == handle:
+                    self.handle = None
+
+        except Exception as e:
+            self._log(f"Source 2 scan error: {e}", "err")
+            self._set_status("Error", RED)
+        finally:
+            self.scanning = False
+            self.root.after(0, lambda: self.scan_btn.configure(state=tk.NORMAL))
+            self.root.after(0, lambda: self.sdk_btn.configure(state=tk.NORMAL))
+            self.root.after(0, self._refresh_dump_buttons)
 
     def _run_source_scan(self):
         try:

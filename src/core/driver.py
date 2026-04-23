@@ -41,6 +41,23 @@ class KernelReadResult:
             return True
         return self.is_chunk_valid(offset // chunk_size)
 
+    def failed_byte_count(self, requested_size: int, chunk_size: int) -> int:
+        requested_size = max(0, int(requested_size or 0))
+        chunk_size = max(1, int(chunk_size or 1))
+        if requested_size == 0 or not self.failed_chunks:
+            return 0
+        total = 0
+        for chunk_index in self.failed_chunks:
+            chunk_offset = int(chunk_index) * chunk_size
+            if chunk_offset >= requested_size:
+                continue
+            total += min(chunk_size, requested_size - chunk_offset)
+        return total
+
+    def actual_byte_count(self, requested_size: int, chunk_size: int) -> int:
+        requested_size = max(0, int(requested_size or 0))
+        return max(0, requested_size - self.failed_byte_count(requested_size, chunk_size))
+
 @dataclass
 class DriverCommandMetrics:
     total_commands: int = 0
@@ -95,14 +112,18 @@ _k32.MapViewOfFile.restype = ctypes.c_void_p
 _k32.MapViewOfFile.argtypes = [wt.HANDLE, wt.DWORD, wt.DWORD, wt.DWORD, ctypes.c_size_t]
 _k32.UnmapViewOfFile.restype = wt.BOOL
 _k32.CloseHandle.restype = wt.BOOL
+_k32.OpenProcess.restype = wt.HANDLE
+_k32.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
 
 FILE_MAP_ALL_ACCESS = 0xF001F
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 
 _g_mapping: int = 0
 _g_view: int = 0
 _health_cache: Optional[dict] = None
 _command_metrics = DriverCommandMetrics()
 _ipc_lock = threading.Lock()
+_last_read_result = threading.local()
 
 _cr3_cache: dict = {}
 _CR3_CACHE_TTL = 30.0
@@ -112,6 +133,54 @@ _JITTER_MIN_US = 50
 _JITTER_MAX_US = 500
 
 _BULK_MODE = False
+
+class FILETIME(ctypes.Structure):
+    _fields_ = [
+        ("dwLowDateTime", wt.DWORD),
+        ("dwHighDateTime", wt.DWORD),
+    ]
+
+_k32.GetProcessTimes.restype = wt.BOOL
+_k32.GetProcessTimes.argtypes = [
+    wt.HANDLE,
+    ctypes.POINTER(FILETIME),
+    ctypes.POINTER(FILETIME),
+    ctypes.POINTER(FILETIME),
+    ctypes.POINTER(FILETIME),
+]
+
+def _store_last_read_result(result: KernelReadResult) -> KernelReadResult:
+    _last_read_result.value = result
+    return result
+
+def get_last_kernel_read_result() -> Optional[KernelReadResult]:
+    return getattr(_last_read_result, "value", None)
+
+def _filetime_to_int(value: FILETIME) -> int:
+    return (int(value.dwHighDateTime) << 32) | int(value.dwLowDateTime)
+
+def _get_process_identity(pid: int) -> int:
+    if pid <= 0:
+        return 0
+    handle = _k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return 0
+    try:
+        created = FILETIME()
+        exited = FILETIME()
+        kernel = FILETIME()
+        user = FILETIME()
+        if not _k32.GetProcessTimes(
+            handle,
+            ctypes.byref(created),
+            ctypes.byref(exited),
+            ctypes.byref(kernel),
+            ctypes.byref(user),
+        ):
+            return 0
+        return _filetime_to_int(created)
+    finally:
+        _k32.CloseHandle(handle)
 
 def _discover_section_name() -> str | None:
     import ctypes.wintypes as _wt
@@ -651,17 +720,32 @@ def find_cr3(pid: int, timeout_ms: int = 2000, force: bool = False) -> int:
         return 0
 
     if not force and pid in _cr3_cache:
-        cr3, ts = _cr3_cache[pid]
+        cached = _cr3_cache[pid]
+        if len(cached) >= 3:
+            cr3, ts, identity = cached[:3]
+        else:
+            cr3, ts = cached[:2]
+            identity = 0
         if time.monotonic() - ts < _CR3_CACHE_TTL:
-            dbg("find_cr3: PID %d cached CR3=0x%X", pid, cr3)
-            return cr3
+            current_identity = _get_process_identity(pid) if identity else 0
+            if identity and current_identity and current_identity != identity:
+                dbg(
+                    "find_cr3: PID %d identity changed (0x%X -> 0x%X), invalidating cached CR3",
+                    pid,
+                    identity,
+                    current_identity,
+                )
+                _cr3_cache.pop(pid, None)
+            else:
+                dbg("find_cr3: PID %d cached CR3=0x%X", pid, cr3)
+                return cr3
 
     dbg("find_cr3: querying CR3 for PID %d", pid)
     if _send_command(pid, 0, 0, COMMAND_FINDCR3, timeout_ms=timeout_ms, retries=3):
         raw = ctypes.string_at(_g_view + COMM_HEADER_SIZE, 8)
         cr3 = struct.unpack_from("<Q", raw)[0]
         if cr3 and cr3 > 0:
-            _cr3_cache[pid] = (cr3, time.monotonic())
+            _cr3_cache[pid] = (cr3, time.monotonic(), _get_process_identity(pid))
             dbg("find_cr3: PID %d => CR3=0x%X", pid, cr3)
             logger.info(f"[Driver] CR3 for PID {pid}: 0x{cr3:X}")
             return cr3
@@ -856,14 +940,20 @@ def _read_memory_kernel_command(pid: int, address: int, size: int, command: int)
     )
 
 def read_memory_kernel(pid: int, address: int, size: int) -> bytes:
-    return _read_memory_kernel_command(pid, address, size, COMMAND_READ).data
+    result = _store_last_read_result(
+        _read_memory_kernel_command(pid, address, size, COMMAND_READ)
+    )
+    return result.data
 
 def read_memory_kernel_tolerant(pid: int, address: int, size: int) -> bytes:
-    return _read_memory_kernel_command(pid, address, size, COMMAND_READ_TOLERANT).data
+    result = _store_last_read_result(
+        _read_memory_kernel_command(pid, address, size, COMMAND_READ_TOLERANT)
+    )
+    return result.data
 
 def read_memory_kernel_ex(pid: int, address: int, size: int, tolerant: bool = False) -> KernelReadResult:
     cmd = COMMAND_READ_TOLERANT if tolerant else COMMAND_READ
-    return _read_memory_kernel_command(pid, address, size, cmd)
+    return _store_last_read_result(_read_memory_kernel_command(pid, address, size, cmd))
 
 def write_memory_kernel(pid: int, address: int, data: bytes) -> bool:
     if not _g_view:

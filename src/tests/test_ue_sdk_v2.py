@@ -340,6 +340,7 @@ class TestUESDKV2(unittest.TestCase):
             self.assertEqual(array_member["type"]["kind"], "array")
             self.assertEqual(array_member["type"]["inner"]["full_name"], "Game.InventoryEntry")
             function_entry = next(item for item in player_entry["functions"] if item["name"] == "GetStat")
+            self.assertEqual(function_entry["signature"], "int32_t GetStat(const int32_t Index, FString& OutName)")
             self.assertIn("FString& OutName", function_entry["signature"])
 
     def test_generate_sdk_prefers_v2(self):
@@ -425,6 +426,243 @@ class TestUESDKV2(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
+
+    def test_v2_generator_repairs_short_names_missing_types_and_enum_collisions(self):
+        layout_base = {
+            "min_alignment": 8,
+            "aligned_size": 0x8,
+            "unaligned_size": 0x8,
+            "highest_member_alignment": 8,
+            "last_member_end": 0x8,
+            "super_size": 0,
+            "reuses_super_tail_padding": False,
+        }
+        layout_item = {
+            "min_alignment": 8,
+            "aligned_size": 0x10,
+            "unaligned_size": 0x10,
+            "highest_member_alignment": 8,
+            "last_member_end": 0x10,
+            "super_size": 0,
+            "reuses_super_tail_padding": False,
+        }
+        layout_derived = {
+            "min_alignment": 8,
+            "aligned_size": 0x20,
+            "unaligned_size": 0x20,
+            "highest_member_alignment": 8,
+            "last_member_end": 0x18,
+            "super_size": 0x8,
+            "reuses_super_tail_padding": False,
+        }
+        classes_v2 = {
+            "schema_version": 2,
+            "kind": "ue_structs",
+            "data": [
+                {
+                    "name": "Derived",
+                    "full_name": "Game.Derived",
+                    "package": "Game",
+                    "kind": "class",
+                    "size": 0x20,
+                    "super_name": "Base",
+                    "super_full_name": "Game.Base",
+                    "super_chain": ["Base"],
+                    "layout": layout_derived,
+                    "members": [
+                        {
+                            "name": "Items",
+                            "offset": 0x8,
+                            "storage_offset": 0x8,
+                            "size": 0x10,
+                            "array_dim": 1,
+                            "flags": "0x0",
+                            "property_class": "ArrayProperty",
+                            "type": {
+                                "kind": "array",
+                                "display_name": "TArray<Item>",
+                                "signature_name": "TArray<Item>",
+                                "full_name": "",
+                                "package": "",
+                                "size": 0x10,
+                                "align": 8,
+                                "is_const": False,
+                                "is_ref": False,
+                                "inner": {
+                                    "kind": "named_struct",
+                                    "display_name": "Item",
+                                    "signature_name": "Item",
+                                    "full_name": "/Script/Game.Item",
+                                    "package": "/Script/Game",
+                                    "size": 0x10,
+                                    "align": 8,
+                                    "is_const": False,
+                                    "is_ref": False,
+                                },
+                            },
+                            "bool_meta": None,
+                        }
+                    ],
+                    "functions": [
+                        {
+                            "name": "Factory",
+                            "address": "0x0",
+                            "rva": "0x0",
+                            "exec_func": "0x0",
+                            "flags": "0x0",
+                            "signature": "UObject*& Factory(UObject* Context)",
+                            "return": {
+                                "name": "ReturnValue",
+                                "offset": 0x8,
+                                "size": 0x8,
+                                "flags": "0x480",
+                                "qualifiers": {"const": False, "out": True, "ref": False, "return": True, "param": True},
+                                "property_class": "ObjectProperty",
+                                "type": None,
+                                "bool_meta": None,
+                            },
+                            "params": [
+                                {
+                                    "name": "Context",
+                                    "offset": 0x0,
+                                    "storage_offset": 0x0,
+                                    "size": 0x8,
+                                    "flags": "0x80",
+                                    "qualifiers": {"const": False, "out": False, "ref": False, "return": False, "param": True},
+                                    "property_class": "ObjectProperty",
+                                    "type": None,
+                                    "bool_meta": None,
+                                },
+                                {
+                                    "name": "ReturnValue",
+                                    "offset": 0x8,
+                                    "storage_offset": 0x8,
+                                    "size": 0x8,
+                                    "flags": "0x480",
+                                    "qualifiers": {"const": False, "out": True, "ref": False, "return": True, "param": True},
+                                    "property_class": "ObjectProperty",
+                                    "type": None,
+                                    "bool_meta": None,
+                                },
+                            ],
+                        }
+                    ],
+                },
+                {
+                    "name": "Base",
+                    "full_name": "Game.Base",
+                    "package": "Game",
+                    "kind": "class",
+                    "size": 0x8,
+                    "super_name": "",
+                    "super_full_name": "",
+                    "super_chain": [],
+                    "layout": layout_base,
+                    "members": [],
+                    "functions": [],
+                },
+                {
+                    "name": "Item",
+                    "full_name": "Game.Item",
+                    "package": "Game",
+                    "kind": "struct",
+                    "size": 0x10,
+                    "super_name": "",
+                    "super_full_name": "",
+                    "super_chain": [],
+                    "layout": layout_item,
+                    "members": [],
+                    "functions": [],
+                },
+            ],
+        }
+        legacy_empty = {"data": []}
+        enums = {
+            "data": [
+                {
+                    "Game.EFlags": [
+                        ["EFlags::None", 0],
+                        ["EFlags::Value", 1],
+                        ["EFlags::Value", 2],
+                        ["EFlags::Max", 300],
+                    ]
+                }
+            ]
+        }
+
+        with tempfile.TemporaryDirectory() as dump_dir, tempfile.TemporaryDirectory() as out_dir:
+            for filename, payload in (
+                ("ClassesInfoV2.json", classes_v2),
+                ("StructsInfoV2.json", {"schema_version": 2, "kind": "ue_structs", "data": []}),
+                ("ClassesInfo.json", legacy_empty),
+                ("StructsInfo.json", legacy_empty),
+                ("EnumsInfo.json", enums),
+                ("OffsetsInfo.json", {"engine": "ue", "data": []}),
+            ):
+                with open(os.path.join(dump_dir, filename), "w", encoding="utf-8") as f:
+                    json.dump(payload, f, indent=2)
+
+            generate_sdk(dump_dir, out_dir, engine="ue")
+
+            with open(os.path.join(out_dir, "Game.hpp"), "r", encoding="utf-8") as f:
+                contents = f.read()
+
+            self.assertLess(contents.index("struct alignas(0x8) Game_Base"), contents.index("struct alignas(0x8) Game_Derived : public Game_Base"))
+            self.assertIn("TArray<Game_Item> Items", contents)
+            self.assertIn("// Signature: UObject* Factory(UObject* Context)", contents)
+            self.assertIn("UObject* Context", contents)
+            self.assertNotIn("void Context", contents)
+            self.assertIn("enum class Game_EFlags : uint16_t", contents)
+            self.assertIn("Value_1 = 2", contents)
+
+    def test_writer_serializes_fallback_function_types(self):
+        dump = SDKDump()
+        actor = StructInfo(
+            name="FallbackActor",
+            full_name="Game.FallbackActor",
+            address=0x2000,
+            size=0x8,
+            is_class=True,
+            package="Game",
+            layout=StructLayoutMeta(
+                min_alignment=8,
+                aligned_size=0x8,
+                unaligned_size=0x8,
+                highest_member_alignment=8,
+                last_member_end=0x8,
+                super_size=0,
+                reuses_super_tail_padding=False,
+            ),
+        )
+        fn = FunctionInfo(name="Factory", address=0x2100, flags=0)
+        fn.params.extend(
+            [
+                FunctionParamInfo(name="Context", offset=0x0, size=0x8, type_name="ObjectProperty", flags=0x80),
+                FunctionParamInfo(name="ReturnValue", offset=0x8, size=0x8, type_name="ObjectProperty", flags=0x480),
+            ]
+        )
+        fn.return_param = fn.params[-1]
+        actor.functions.append(fn)
+        dump.structs.append(actor)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            write_all(
+                temp_dir,
+                dump,
+                gnames_off=0x1,
+                gobjects_off=0x2,
+                gworld_off=0x3,
+                engine="ue",
+                ue_version="5.1",
+            )
+            with open(os.path.join(temp_dir, "ClassesInfoV2.json"), "r", encoding="utf-8") as f:
+                classes_v2 = json.load(f)
+            entry = classes_v2["data"][0]
+            function_entry = entry["functions"][0]
+            self.assertEqual(function_entry["signature"], "UObject* Factory(UObject* Context)")
+            self.assertIsNotNone(function_entry["return"]["type"])
+            self.assertEqual(function_entry["return"]["type"]["kind"], "object")
+            self.assertIsNotNone(function_entry["params"][0]["type"])
 
 
 if __name__ == "__main__":

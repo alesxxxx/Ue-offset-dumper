@@ -12,8 +12,21 @@ def _sanitize_identifier(name: str) -> str:
     return safe or "Unknown"
 
 
+def _align_up(value: int, alignment: int) -> int:
+    alignment = max(1, int(alignment or 1))
+    return (int(value or 0) + alignment - 1) & ~(alignment - 1)
+
+
+def _normalize_full_name(full_name: str) -> str:
+    text = str(full_name or "").replace("\\", "/").strip()
+    text = text.replace("/Script/", "")
+    while text.startswith("."):
+        text = text[1:]
+    return text
+
+
 def _split_full_name(full_name: str) -> Tuple[str, str]:
-    full_name = str(full_name or "").replace("/Script/", "")
+    full_name = _normalize_full_name(full_name)
     if "." in full_name:
         package, short_name = full_name.split(".", 1)
         return package, short_name
@@ -27,6 +40,62 @@ def _symbol_for_full_name(full_name: str) -> str:
 
 def _package_symbol(package_name: str) -> str:
     return _sanitize_identifier(package_name or "Global")
+
+
+def _normalize_type_node(type_node: Optional[dict]) -> None:
+    if not type_node:
+        return
+    if "full_name" in type_node:
+        type_node["full_name"] = _normalize_full_name(type_node.get("full_name"))
+    if "package" in type_node:
+        type_node["package"] = _normalize_full_name(type_node.get("package"))
+    for child_key in ("pointee", "inner", "key", "value", "enum_underlying"):
+        _normalize_type_node(type_node.get(child_key))
+
+
+def _infer_enum_underlying(values: List[list]) -> str:
+    ints: List[int] = []
+    for item in values or []:
+        if not isinstance(item, (list, tuple)) or len(item) < 2:
+            continue
+        try:
+            ints.append(int(item[1]))
+        except (TypeError, ValueError):
+            continue
+    if not ints:
+        return "uint8_t"
+    min_val = min(ints)
+    max_val = max(ints)
+    if min_val < 0:
+        if -0x80 <= min_val and max_val <= 0x7F:
+            return "int8_t"
+        if -0x8000 <= min_val and max_val <= 0x7FFF:
+            return "int16_t"
+        if -0x80000000 <= min_val and max_val <= 0x7FFFFFFF:
+            return "int32_t"
+        return "int64_t"
+    if max_val <= 0xFF:
+        return "uint8_t"
+    if max_val <= 0xFFFF:
+        return "uint16_t"
+    if max_val <= 0xFFFFFFFF:
+        return "uint32_t"
+    return "uint64_t"
+
+
+def _type_width_rank(type_name: str) -> int:
+    normalized = str(type_name or "").replace("std::", "")
+    ranks = {
+        "uint8_t": 1,
+        "int8_t": 1,
+        "uint16_t": 2,
+        "int16_t": 2,
+        "uint32_t": 4,
+        "int32_t": 4,
+        "uint64_t": 8,
+        "int64_t": 8,
+    }
+    return ranks.get(normalized, 0)
 
 
 def _load_json(path: str, default):
@@ -48,7 +117,19 @@ def _load_v2_struct_entries(dump_dir: str) -> List[dict]:
     for filename in ("ClassesInfoV2.json", "StructsInfoV2.json"):
         payload = _load_json(os.path.join(dump_dir, filename), {})
         if payload.get("schema_version") == 2:
-            entries.extend(payload.get("data", []) or [])
+            for entry in payload.get("data", []) or []:
+                if not entry:
+                    continue
+                entry["full_name"] = _normalize_full_name(entry.get("full_name"))
+                entry["package"] = _normalize_full_name(entry.get("package"))
+                entry["super_full_name"] = _normalize_full_name(entry.get("super_full_name"))
+                for member in entry.get("members", []) or []:
+                    _normalize_type_node(member.get("type"))
+                for function in entry.get("functions", []) or []:
+                    _normalize_type_node((function.get("return") or {}).get("type"))
+                    for param in function.get("params", []) or []:
+                        _normalize_type_node(param.get("type"))
+                entries.append(entry)
     return entries
 
 
@@ -59,6 +140,7 @@ def _load_legacy_enums(dump_dir: str) -> Dict[str, dict]:
         if not entry:
             continue
         full_name, values = next(iter(entry.items()))
+        full_name = _normalize_full_name(full_name)
         package, short_name = _split_full_name(full_name)
         enums[full_name] = {
             "full_name": full_name,
@@ -66,9 +148,32 @@ def _load_legacy_enums(dump_dir: str) -> Dict[str, dict]:
             "name": short_name,
             "symbol": _symbol_for_full_name(full_name),
             "values": list(values or []),
-            "underlying": "uint8_t",
+            "underlying": _infer_enum_underlying(list(values or [])),
         }
     return enums
+
+
+def _build_short_name_index(items: Iterable[dict]) -> Dict[str, List[dict]]:
+    index: Dict[str, List[dict]] = defaultdict(list)
+    for item in items:
+        if not item:
+            continue
+        short_name = item.get("name") or _split_full_name(item.get("full_name", ""))[1]
+        if short_name:
+            index[short_name].append(item)
+    return index
+
+
+def _unique_short_name_match(short_name: str, index: Dict[str, List[dict]]) -> Optional[dict]:
+    matches = index.get(short_name or "", [])
+    return matches[0] if len(matches) == 1 else None
+
+
+def _first_member_offset(entry: dict) -> int:
+    members = entry.get("members", []) or []
+    if not members:
+        return 0
+    return min(int(member.get("storage_offset", member.get("offset", 0)) or 0) for member in members)
 
 
 def _iter_type_refs(type_node: Optional[dict], *, context: str = "direct") -> Iterable[Tuple[str, str, str, Optional[str]]]:
@@ -167,6 +272,17 @@ def _topological_components(graph: Dict[str, Set[str]]) -> Tuple[List[List[str]]
 
     if len(ordered) != len(components):
         ordered = components
+    else:
+        ordered.reverse()
+
+    # Rebuild component_index so it points into `ordered`, not the pre-sort
+    # `components` list. Callers use component_index[node] as an index back into
+    # the returned list, so the two must stay in sync after reordering.
+    component_index = {
+        node: idx
+        for idx, nodes in enumerate(ordered)
+        for node in nodes
+    }
 
     return ordered, component_index, condensed
 
@@ -182,7 +298,12 @@ def _collect_enum_underlyings(type_entries: List[dict], enums: Dict[str, dict]) 
                 or ((type_node.get("enum_underlying") or {}).get("display_name"))
                 or enums[type_node["full_name"]]["underlying"]
             )
-            enums[type_node["full_name"]]["underlying"] = underlying
+            current = enums[type_node["full_name"]]["underlying"]
+            enums[type_node["full_name"]]["underlying"] = (
+                underlying
+                if _type_width_rank(underlying) >= _type_width_rank(current)
+                else current
+            )
         for child_key in ("pointee", "inner", "key", "value", "enum_underlying"):
             visit_type_node(type_node.get(child_key))
 
@@ -195,7 +316,29 @@ def _collect_enum_underlyings(type_entries: List[dict], enums: Dict[str, dict]) 
                 visit_type_node(param.get("type"))
 
 
-def _build_type_index(entries: List[dict], enums: Dict[str, dict]) -> Tuple[Dict[str, dict], Dict[str, List[dict]], Dict[str, Set[str]], Dict[str, Set[str]], Dict[str, Dict[str, str]], Dict[str, Dict[str, Set[str]]]]:
+def _canonical_root_placeholder(name: str) -> str:
+    canonical = {
+        "Object": "UObject",
+        "Class": "UClass",
+        "Interface": "UInterface",
+        "Function": "UFunction",
+    }
+    return canonical.get(name or "", "")
+
+
+def _build_type_index(
+    entries: List[dict],
+    enums: Dict[str, dict],
+) -> Tuple[
+    Dict[str, dict],
+    Dict[str, List[dict]],
+    Dict[str, Set[str]],
+    Dict[str, Set[str]],
+    Dict[str, Dict[str, str]],
+    Dict[str, Dict[str, Set[str]]],
+    Dict[str, List[dict]],
+    Dict[str, List[dict]],
+]:
     types_by_full: Dict[str, dict] = {}
     packages: Dict[str, List[dict]] = defaultdict(list)
     package_graph: Dict[str, Set[str]] = defaultdict(set)
@@ -215,6 +358,20 @@ def _build_type_index(entries: List[dict], enums: Dict[str, dict]) -> Tuple[Dict
         entry["soft_deps"] = set()
         types_by_full[full_name] = entry
         packages[package].append(entry)
+
+    type_short_index = _build_short_name_index(types_by_full.values())
+    enum_short_index = _build_short_name_index(enums.values())
+
+    for entry in entries:
+        if entry.get("super_full_name"):
+            entry["super_full_name"] = _normalize_full_name(entry.get("super_full_name"))
+            continue
+        super_name = entry.get("super_name") or ""
+        if not super_name:
+            continue
+        match = _unique_short_name_match(super_name, type_short_index)
+        if match is not None:
+            entry["super_full_name"] = match["full_name"]
 
     for entry in entries:
         full_name = entry["full_name"]
@@ -265,41 +422,391 @@ def _build_type_index(entries: List[dict], enums: Dict[str, dict]) -> Tuple[Dict
         package_graph.setdefault(package, set())
         type_graph_by_package.setdefault(package, {})
 
-    return types_by_full, packages, package_graph, soft_struct_refs, enum_refs, type_graph_by_package
+    return (
+        types_by_full,
+        packages,
+        package_graph,
+        soft_struct_refs,
+        enum_refs,
+        type_graph_by_package,
+        type_short_index,
+        enum_short_index,
+    )
 
 
-def _qualified_type_name(type_node: Optional[dict], *, current_package: str, types_by_full: Dict[str, dict], enums: Dict[str, dict], same_scc_packages: Set[str], emitted_symbols: Set[str], direct_value_context: bool) -> Tuple[str, bool]:
+def _opaque_fixup(size_hint: int, align_hint: int) -> str:
+    return f"TCycleFixup<0x{max(1, int(size_hint or 1)):X}, 0x{max(1, int(align_hint or 1)):X}>"
+
+
+def _integral_type_for_size(size_hint: int) -> str:
+    size_hint = max(1, int(size_hint or 1))
+    return {
+        1: "uint8_t",
+        2: "uint16_t",
+        4: "uint32_t",
+        8: "uint64_t",
+    }.get(size_hint, _opaque_fixup(size_hint, min(size_hint, 8)))
+
+
+def _resolve_struct_symbol(
+    *,
+    full_name: str,
+    display_name: str,
+    signature_name: str,
+    types_by_full: Dict[str, dict],
+    type_short_index: Dict[str, List[dict]],
+) -> Tuple[str, Optional[dict]]:
+    full_name = _normalize_full_name(full_name)
+    if full_name and full_name in types_by_full:
+        return types_by_full[full_name]["symbol"], types_by_full[full_name]
+
+    candidates: List[str] = []
+    if full_name:
+        candidates.append(full_name.split(".")[-1])
+    for candidate in (signature_name, display_name):
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+
+    for candidate in candidates:
+        match = _unique_short_name_match(candidate, type_short_index)
+        if match is not None:
+            return match["symbol"], match
+
+    for candidate in candidates:
+        placeholder = _canonical_root_placeholder(candidate)
+        if placeholder:
+            return placeholder, None
+
+    return "", None
+
+
+def _resolve_enum_symbol(
+    *,
+    full_name: str,
+    display_name: str,
+    signature_name: str,
+    enums: Dict[str, dict],
+    enum_short_index: Dict[str, List[dict]],
+) -> Tuple[str, Optional[dict]]:
+    full_name = _normalize_full_name(full_name)
+    if full_name and full_name in enums:
+        return enums[full_name]["symbol"], enums[full_name]
+
+    candidates: List[str] = []
+    if full_name:
+        candidates.append(full_name.split(".")[-1])
+    for candidate in (signature_name, display_name):
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+
+    for candidate in candidates:
+        match = _unique_short_name_match(candidate, enum_short_index)
+        if match is not None:
+            return match["symbol"], match
+
+    return "", None
+
+
+def _fallback_cpp_type(property_class: str, size_hint: int, align_hint: int) -> Tuple[str, bool]:
+    property_class = str(property_class or "")
+    size_hint = max(0, int(size_hint or 0))
+    align_hint = max(1, int(align_hint or 1))
+
+    primitive_fallbacks = {
+        "BoolProperty": "bool",
+        "ByteProperty": "uint8_t",
+        "Int8Property": "int8_t",
+        "Int16Property": "int16_t",
+        "IntProperty": "int32_t",
+        "Int64Property": "int64_t",
+        "UInt16Property": "uint16_t",
+        "UInt32Property": "uint32_t",
+        "UInt64Property": "uint64_t",
+        "FloatProperty": "float",
+        "DoubleProperty": "double",
+        "NameProperty": "FName",
+        "StrProperty": "FString",
+        "TextProperty": "FText",
+    }
+    if property_class in primitive_fallbacks:
+        return primitive_fallbacks[property_class], False
+    if property_class == "EnumProperty":
+        return _integral_type_for_size(size_hint or 1), False
+    if property_class == "StructProperty":
+        return _opaque_fixup(size_hint or 1, align_hint), True
+    if property_class in {"ObjectProperty", "AssetObjectProperty"}:
+        return "UObject*", False
+    if property_class == "ObjectPtrProperty":
+        return "TObjectPtr<UObject>", False
+    if property_class == "ClassProperty":
+        return "UClass*", False
+    if property_class == "ClassPtrProperty":
+        return "TObjectPtr<UClass>", False
+    if property_class in {"SoftClassProperty", "AssetClassProperty"}:
+        return "TSoftClassPtr<UObject>", False
+    if property_class == "SoftObjectProperty":
+        return "TSoftObjectPtr<UObject>", False
+    if property_class == "WeakObjectProperty":
+        return "TWeakObjectPtr<UObject>", False
+    if property_class == "LazyObjectProperty":
+        return "TLazyObjectPtr<UObject>", False
+    if property_class == "InterfaceProperty":
+        return "TScriptInterface<UInterface>", False
+    if property_class == "ArrayProperty":
+        return "TArray<uint8_t>", False
+    if property_class == "SetProperty":
+        return "TSet<uint8_t>", False
+    if property_class == "MapProperty":
+        return "TMap<uint8_t, uint8_t>", False
+    if property_class == "DelegateProperty":
+        return "FScriptDelegate", False
+    if property_class == "MulticastSparseDelegateProperty":
+        return "uint8_t", False
+    if property_class in {
+        "MulticastDelegateProperty",
+        "MulticastInlineDelegateProperty",
+    }:
+        return "FMulticastScriptDelegate", False
+    if property_class == "FieldPathProperty":
+        return "TFieldPath<UObject>", False
+    if size_hint > 1:
+        return _opaque_fixup(size_hint, align_hint), True
+    return "uint8_t", False
+
+
+def _emitted_type_alignment(
+    type_node: Optional[dict],
+    property_class: str,
+    size_hint: int,
+    types_by_full: Dict[str, dict],
+    type_short_index: Dict[str, List[dict]],
+) -> int:
+    """Return the natural alignment of the C++ type `_qualified_type_name`
+    would emit for this field. This drives the offset-compatibility guard in
+    `_emit_struct_body` / `_emit_function_param_structs`: if a dump-reported
+    offset cannot satisfy this alignment, the field must be emitted as an
+    opaque layout-only wrapper instead.
+    """
     if not type_node:
-        return "void", False
-    kind = type_node.get("kind")
-    signature_name = type_node.get("signature_name") or type_node.get("display_name") or "void"
-    size_hint = int(type_node.get("size") or 0)
-    align_hint = int(type_node.get("align") or 1)
+        return 1
+    kind = type_node.get("kind") or ""
+    size_hint = max(0, int(size_hint or 0))
 
     if kind == "named_struct":
-        full_name = type_node.get("full_name") or ""
-        target = types_by_full.get(full_name)
-        if not target:
-            return signature_name or "uint8_t", False
-        symbol = target["symbol"]
+        full_name = _normalize_full_name(type_node.get("full_name", ""))
+        target = types_by_full.get(full_name) if full_name else None
+        if target is None:
+            # Try short-name match (same resolution path as _resolve_struct_symbol)
+            candidates = []
+            if full_name:
+                candidates.append(full_name.split(".")[-1])
+            for cand in (type_node.get("signature_name"), type_node.get("display_name")):
+                if cand and cand not in candidates:
+                    candidates.append(cand)
+            for cand in candidates:
+                match = _unique_short_name_match(cand, type_short_index)
+                if match is not None:
+                    target = match
+                    break
+        if target is not None:
+            layout = target.get("layout") or {}
+            return max(1, int(layout.get("min_alignment") or 1))
+        return 1
+
+    if kind == "enum":
+        # A 1-byte enum (including TEnumAsByte) is 1-aligned; larger enums
+        # take the width implied by their size.
+        if size_hint <= 1:
+            return 1
+        if size_hint >= 8:
+            return 8
+        if size_hint >= 4:
+            return 4
+        if size_hint >= 2:
+            return 2
+        return 1
+
+    if kind == "primitive":
+        sig = (type_node.get("signature_name") or "").replace("std::", "")
+        primitives = {
+            "bool": 1, "char": 1, "uint8_t": 1, "int8_t": 1,
+            "uint16_t": 2, "int16_t": 2,
+            "uint32_t": 4, "int32_t": 4, "float": 4,
+            "uint64_t": 8, "int64_t": 8, "double": 8,
+            "FName": 4,
+            "FString": 8, "FText": 8,
+        }
+        if sig in primitives:
+            return primitives[sig]
+        return max(1, int(type_node.get("align") or 1))
+
+    if kind == "opaque":
+        if size_hint > 1:
+            return max(1, int(type_node.get("align") or 1))
+        return 1
+
+    # Pointer-ish or container-ish types
+    pointer_like_8 = {
+        "object", "object_ptr", "class", "class_ptr",
+        "soft_object", "soft_class", "interface", "field_path",
+        "array", "set", "map",
+    }
+    if kind in pointer_like_8:
+        return 8
+    if kind == "weak_object":
+        return 4
+    if kind == "lazy_object":
+        return 4
+    if kind == "delegate":
+        return 1 if size_hint <= 1 else 8
+    if kind == "multicast_delegate":
+        if property_class == "MulticastSparseDelegateProperty" or size_hint <= 1:
+            return 1
+        return 8
+
+    return max(1, int(type_node.get("align") or 1))
+
+
+def _effective_field_alignment(type_node: Optional[dict], property_class: str, size_hint: int, default_align: int = 1) -> int:
+    property_class = str(property_class or "")
+    size_hint = max(1, int(size_hint or 1))
+    explicit_align = int((type_node or {}).get("align") or 0)
+    primitive_alignments = {
+        "BoolProperty": 1,
+        "ByteProperty": 1,
+        "Int8Property": 1,
+        "Int16Property": 2,
+        "UInt16Property": 2,
+        "IntProperty": 4,
+        "UInt32Property": 4,
+        "FloatProperty": 4,
+        "NameProperty": 4,
+        "Int64Property": 8,
+        "UInt64Property": 8,
+        "DoubleProperty": 8,
+        "StrProperty": 8,
+        "TextProperty": 8,
+    }
+
+    if property_class == "MulticastSparseDelegateProperty":
+        return 1
+    if property_class == "StructProperty":
+        return max(1, explicit_align or int(default_align or 1))
+    if property_class == "EnumProperty":
+        if size_hint >= 8:
+            return 8
+        if size_hint >= 4:
+            return 4
+        if size_hint >= 2:
+            return 2
+        return 1
+    if property_class in primitive_alignments:
+        return primitive_alignments[property_class]
+    if property_class in {
+        "ObjectProperty",
+        "AssetObjectProperty",
+        "ObjectPtrProperty",
+        "ClassProperty",
+        "ClassPtrProperty",
+        "SoftClassProperty",
+        "AssetClassProperty",
+        "SoftObjectProperty",
+        "WeakObjectProperty",
+        "LazyObjectProperty",
+        "InterfaceProperty",
+        "DelegateProperty",
+        "MulticastDelegateProperty",
+        "MulticastInlineDelegateProperty",
+        "FieldPathProperty",
+        "ArrayProperty",
+        "SetProperty",
+        "MapProperty",
+    }:
+        return 8
+    if explicit_align > 0:
+        return explicit_align
+    if size_hint >= 8:
+        return 8
+    if size_hint >= 4:
+        return 4
+    if size_hint >= 2:
+        return 2
+    return max(1, int(default_align or 1))
+
+
+def _qualified_type_name(
+    type_node: Optional[dict],
+    *,
+    current_package: str,
+    types_by_full: Dict[str, dict],
+    enums: Dict[str, dict],
+    type_short_index: Dict[str, List[dict]],
+    enum_short_index: Dict[str, List[dict]],
+    same_scc_packages: Set[str],
+    emitted_symbols: Set[str],
+    direct_value_context: bool,
+    property_class: str = "",
+    size_hint: int = 0,
+    align_hint: int = 1,
+) -> Tuple[str, bool]:
+    if not type_node:
+        return _fallback_cpp_type(property_class, size_hint, align_hint)
+
+    kind = type_node.get("kind")
+    signature_name = type_node.get("signature_name") or type_node.get("display_name") or "void"
+    size_hint = max(int(type_node.get("size") or 0), int(size_hint or 0))
+    align_hint = int(type_node.get("align") or align_hint or 1)
+
+    if kind == "named_struct":
+        symbol, target = _resolve_struct_symbol(
+            full_name=type_node.get("full_name", ""),
+            display_name=type_node.get("display_name", ""),
+            signature_name=signature_name,
+            types_by_full=types_by_full,
+            type_short_index=type_short_index,
+        )
+        if not symbol:
+            return _fallback_cpp_type(property_class or "StructProperty", size_hint, align_hint)
+        if target is None:
+            return symbol, False
         if direct_value_context:
             if target["package"] == current_package:
                 if symbol in emitted_symbols:
                     return symbol, False
-                return f"TCycleFixup<0x{int(target.get('size', 0) or size_hint):X}, 0x{int(((target.get('layout') or {}).get('min_alignment') or align_hint or 1)):X}>", True
+                return _opaque_fixup(
+                    int(target.get("size", 0) or size_hint or 1),
+                    int(((target.get("layout") or {}).get("min_alignment") or align_hint or 1)),
+                ), True
             if target["package"] in same_scc_packages:
-                return f"TCycleFixup<0x{int(target.get('size', 0) or size_hint):X}, 0x{int(((target.get('layout') or {}).get('min_alignment') or align_hint or 1)):X}>", True
+                return _opaque_fixup(
+                    int(target.get("size", 0) or size_hint or 1),
+                    int(((target.get("layout") or {}).get("min_alignment") or align_hint or 1)),
+                ), True
         return symbol, False
 
     if kind == "enum":
-        full_name = type_node.get("full_name") or ""
-        enum_info = enums.get(full_name)
-        return (enum_info["symbol"] if enum_info else signature_name), False
+        symbol, enum_info = _resolve_enum_symbol(
+            full_name=type_node.get("full_name", ""),
+            display_name=type_node.get("display_name", ""),
+            signature_name=signature_name,
+            enums=enums,
+            enum_short_index=enum_short_index,
+        )
+        if symbol:
+            underlying = (enum_info or {}).get("underlying", "uint8_t")
+            if int(size_hint or 0) == 1 and _type_width_rank(underlying) > 1:
+                return f"TEnumAsByte<{symbol}>", False
+            return symbol, False
+        if enum_info is not None:
+            return enum_info.get("underlying", "uint8_t"), False
+        return _fallback_cpp_type(property_class or "EnumProperty", size_hint or 1, align_hint)
 
     if kind in {"primitive", "opaque"}:
         if kind == "opaque" and size_hint > 1:
-            return f"TCycleFixup<0x{size_hint:X}, 0x{max(1, align_hint):X}>", True
-        return signature_name, False
+            return _opaque_fixup(size_hint, align_hint), True
+        if signature_name and signature_name != "void":
+            return signature_name, False
+        return _fallback_cpp_type(property_class, size_hint, align_hint)
 
     if kind in {"object", "object_ptr", "class", "class_ptr", "soft_object", "soft_class", "weak_object", "lazy_object", "interface", "field_path"}:
         pointee, _ = _qualified_type_name(
@@ -307,9 +814,13 @@ def _qualified_type_name(type_node: Optional[dict], *, current_package: str, typ
             current_package=current_package,
             types_by_full=types_by_full,
             enums=enums,
+            type_short_index=type_short_index,
+            enum_short_index=enum_short_index,
             same_scc_packages=same_scc_packages,
             emitted_symbols=emitted_symbols,
             direct_value_context=False,
+            size_hint=8,
+            align_hint=8,
         )
         if kind == "object":
             return f"{pointee}*", False
@@ -340,9 +851,13 @@ def _qualified_type_name(type_node: Optional[dict], *, current_package: str, typ
             current_package=current_package,
             types_by_full=types_by_full,
             enums=enums,
+            type_short_index=type_short_index,
+            enum_short_index=enum_short_index,
             same_scc_packages=same_scc_packages,
             emitted_symbols=emitted_symbols,
             direct_value_context=False,
+            size_hint=max(1, size_hint),
+            align_hint=align_hint,
         )
         return f"TArray<{inner}>", False
 
@@ -352,9 +867,13 @@ def _qualified_type_name(type_node: Optional[dict], *, current_package: str, typ
             current_package=current_package,
             types_by_full=types_by_full,
             enums=enums,
+            type_short_index=type_short_index,
+            enum_short_index=enum_short_index,
             same_scc_packages=same_scc_packages,
             emitted_symbols=emitted_symbols,
             direct_value_context=False,
+            size_hint=max(1, size_hint),
+            align_hint=align_hint,
         )
         return f"TSet<{inner}>", False
 
@@ -364,27 +883,41 @@ def _qualified_type_name(type_node: Optional[dict], *, current_package: str, typ
             current_package=current_package,
             types_by_full=types_by_full,
             enums=enums,
+            type_short_index=type_short_index,
+            enum_short_index=enum_short_index,
             same_scc_packages=same_scc_packages,
             emitted_symbols=emitted_symbols,
             direct_value_context=False,
+            size_hint=max(1, size_hint),
+            align_hint=align_hint,
         )
         value, _ = _qualified_type_name(
             type_node.get("value"),
             current_package=current_package,
             types_by_full=types_by_full,
             enums=enums,
+            type_short_index=type_short_index,
+            enum_short_index=enum_short_index,
             same_scc_packages=same_scc_packages,
             emitted_symbols=emitted_symbols,
             direct_value_context=False,
+            size_hint=max(1, size_hint),
+            align_hint=align_hint,
         )
         return f"TMap<{key}, {value}>", False
 
     if kind == "delegate":
+        if size_hint <= 1:
+            return _fallback_cpp_type(property_class or "DelegateProperty", size_hint, align_hint)
         return "FScriptDelegate", False
     if kind == "multicast_delegate":
+        if property_class == "MulticastSparseDelegateProperty" or size_hint <= 1:
+            return _fallback_cpp_type(property_class or "MulticastSparseDelegateProperty", size_hint, align_hint)
         return "FMulticastScriptDelegate", False
 
-    return signature_name or "uint8_t", False
+    if signature_name and signature_name != "void":
+        return signature_name, False
+    return _fallback_cpp_type(property_class, size_hint, align_hint)
 
 
 def _emit_field_declaration(cpp_type: str, field_name: str, *, array_dim: int = 1, comment: str = "") -> str:
@@ -401,6 +934,7 @@ def _emit_padding(name: str, offset: int, size: int) -> str:
 def _emit_bitfield_group(group: List[dict], storage_offset: int) -> str:
     lines: List[str] = []
     cursor = 0
+    used_names: Set[str] = set()
     group = sorted(group, key=lambda item: (item["bool_meta"]["bit_index"], item["name"]))
     for index, member in enumerate(group):
         bit_index = int((member.get("bool_meta") or {}).get("bit_index", -1))
@@ -410,8 +944,9 @@ def _emit_bitfield_group(group: List[dict], storage_offset: int) -> str:
             lines.append(
                 f"    uint8_t pad_bits_{storage_offset:04X}_{index} : {bit_index - cursor};\n"
             )
+        field_name = _dedupe_field_name(member["name"], used_names)
         lines.append(
-            f"    uint8_t {_sanitize_identifier(member['name'])} : 1; // 0x{storage_offset:04X} bit {bit_index}\n"
+            f"    uint8_t {field_name} : 1; // 0x{storage_offset:04X} bit {bit_index}\n"
         )
         cursor = bit_index + 1
     if cursor < 8:
@@ -421,7 +956,17 @@ def _emit_bitfield_group(group: List[dict], storage_offset: int) -> str:
     return "".join(lines)
 
 
-def _emit_struct_body(type_entry: dict, *, current_package: str, types_by_full: Dict[str, dict], enums: Dict[str, dict], same_scc_packages: Set[str], emitted_symbols: Set[str]) -> Tuple[str, List[Tuple[str, int]]]:
+def _emit_struct_body(
+    type_entry: dict,
+    *,
+    current_package: str,
+    types_by_full: Dict[str, dict],
+    enums: Dict[str, dict],
+    type_short_index: Dict[str, List[dict]],
+    enum_short_index: Dict[str, List[dict]],
+    same_scc_packages: Set[str],
+    emitted_symbols: Set[str],
+) -> Tuple[str, List[Tuple[str, int]]]:
     layout = type_entry.get("layout") or {}
     members = sorted(
         type_entry.get("members", []) or [],
@@ -433,6 +978,7 @@ def _emit_struct_body(type_entry: dict, *, current_package: str, types_by_full: 
     )
     lines: List[str] = []
     assertions: List[Tuple[str, int]] = []
+    used_field_names: Set[str] = set()
 
     super_full_name = type_entry.get("super_full_name") or ""
     super_entry = types_by_full.get(super_full_name) if super_full_name else None
@@ -441,9 +987,8 @@ def _emit_struct_body(type_entry: dict, *, current_package: str, types_by_full: 
     if super_entry is not None:
         if reuse_super_tail:
             used_size = int((super_entry.get("layout") or {}).get("last_member_end") or super_entry.get("size") or 0)
-            super_align = int((super_entry.get("layout") or {}).get("min_alignment") or 1)
             lines.append(
-                f"    TCycleFixup<0x{used_size:X}, 0x{super_align:X}> Super; // logical base: {super_entry['symbol']}\n"
+                f"    TCycleFixup<0x{used_size:X}, 0x1> Super; // logical base: {super_entry['symbol']}\n"
             )
             current_offset = used_size
         else:
@@ -479,27 +1024,55 @@ def _emit_struct_body(type_entry: dict, *, current_package: str, types_by_full: 
             continue
 
         type_node = member.get("type") or {}
+        member_offset = int(member.get("offset", 0))
+        member_size = max(1, int(member.get("size", 1)))
+        member_property_class = member.get("property_class", "")
+        array_dim = int(member.get("array_dim", 1) or 1)
+        # member.size is the TOTAL field size (including array_dim); the type
+        # description corresponds to a single element, so derive per-element
+        # size for type/alignment computations.
+        element_size = max(1, member_size // array_dim) if array_dim > 1 else member_size
         cpp_type, _ = _qualified_type_name(
             type_node,
             current_package=current_package,
             types_by_full=types_by_full,
             enums=enums,
+            type_short_index=type_short_index,
+            enum_short_index=enum_short_index,
             same_scc_packages=same_scc_packages,
             emitted_symbols=emitted_symbols,
             direct_value_context=True,
+            property_class=member_property_class,
+            size_hint=element_size,
+            align_hint=int((type_node.get("align") if type_node else 0) or 1),
         )
-        array_dim = int(member.get("array_dim", 1) or 1)
-        comment = f"0x{int(member.get('offset', 0)):04X}"
+        # Guard: if the emitted C++ type declares an alignment stronger than
+        # the real field offset can satisfy, swap in an opaque layout-only
+        # wrapper. This handles cases where UE packed a struct with a by-value
+        # member whose natural C++ alignment would otherwise push the offset
+        # forward (FScriptDelegate@4, by-value nested struct at mis-aligned
+        # offset, TFieldPath/TSoftObjectPtr at non-8 offsets, etc.).
+        emitted_align = _emitted_type_alignment(
+            type_node,
+            member_property_class,
+            element_size,
+            types_by_full,
+            type_short_index,
+        )
+        if emitted_align > 1 and (member_offset % emitted_align) != 0:
+            cpp_type = _opaque_fixup(element_size, 1)
+        comment = f"0x{member_offset:04X}"
+        emitted_name = _dedupe_field_name(member.get("name", "Field"), used_field_names)
         lines.append(
             _emit_field_declaration(
                 cpp_type,
-                member.get("name", "Field"),
+                emitted_name,
                 array_dim=array_dim,
                 comment=comment,
             )
         )
-        assertions.append((member.get("name", "Field"), int(member.get("offset", 0))))
-        current_offset = storage_offset + max(1, int(member.get("size", 1)))
+        assertions.append((emitted_name, member_offset))
+        current_offset = storage_offset + member_size
         idx += 1
 
     struct_size = int(type_entry.get("size", 0))
@@ -509,7 +1082,96 @@ def _emit_struct_body(type_entry: dict, *, current_package: str, types_by_full: 
     return "".join(lines), assertions
 
 
-def _emit_function_param_structs(type_entry: dict, *, current_package: str, types_by_full: Dict[str, dict], enums: Dict[str, dict], same_scc_packages: Set[str], emitted_symbols: Set[str]) -> str:
+def _format_signature_param(
+    param: dict,
+    *,
+    current_package: str,
+    types_by_full: Dict[str, dict],
+    enums: Dict[str, dict],
+    type_short_index: Dict[str, List[dict]],
+    enum_short_index: Dict[str, List[dict]],
+    same_scc_packages: Set[str],
+    emitted_symbols: Set[str],
+    is_return: bool,
+) -> str:
+    cpp_type, _ = _qualified_type_name(
+        param.get("type"),
+        current_package=current_package,
+        types_by_full=types_by_full,
+        enums=enums,
+        type_short_index=type_short_index,
+        enum_short_index=enum_short_index,
+        same_scc_packages=same_scc_packages,
+        emitted_symbols=emitted_symbols,
+        direct_value_context=False,
+        property_class=param.get("property_class", ""),
+        size_hint=int(param.get("size", 0) or 0),
+        align_hint=int(((param.get("type") or {}).get("align") or 1)),
+    )
+    qualifiers = param.get("qualifiers") or {}
+    if qualifiers.get("const") and not cpp_type.startswith("const "):
+        cpp_type = f"const {cpp_type}"
+    if not is_return and (qualifiers.get("ref") or qualifiers.get("out")):
+        cpp_type = f"{cpp_type}&"
+    if is_return:
+        return cpp_type
+    return f"{cpp_type} {_sanitize_identifier(param.get('name', 'Param'))}"
+
+
+def _format_function_signature(
+    function: dict,
+    *,
+    current_package: str,
+    types_by_full: Dict[str, dict],
+    enums: Dict[str, dict],
+    type_short_index: Dict[str, List[dict]],
+    enum_short_index: Dict[str, List[dict]],
+    same_scc_packages: Set[str],
+    emitted_symbols: Set[str],
+) -> str:
+    return_info = function.get("return") or None
+    return_type = "void"
+    if return_info:
+        return_type = _format_signature_param(
+            return_info,
+            current_package=current_package,
+            types_by_full=types_by_full,
+            enums=enums,
+            type_short_index=type_short_index,
+            enum_short_index=enum_short_index,
+            same_scc_packages=same_scc_packages,
+            emitted_symbols=emitted_symbols,
+            is_return=True,
+        )
+    params = [
+        _format_signature_param(
+            param,
+            current_package=current_package,
+            types_by_full=types_by_full,
+            enums=enums,
+            type_short_index=type_short_index,
+            enum_short_index=enum_short_index,
+            same_scc_packages=same_scc_packages,
+            emitted_symbols=emitted_symbols,
+            is_return=False,
+        )
+        for param in function.get("params", []) or []
+        if not ((param.get("qualifiers") or {}).get("return"))
+    ]
+    return f"{return_type} {function.get('name', 'Function')}({', '.join(params)})"
+
+
+def _emit_function_param_structs(
+    type_entry: dict,
+    *,
+    current_package: str,
+    types_by_full: Dict[str, dict],
+    enums: Dict[str, dict],
+    type_short_index: Dict[str, List[dict]],
+    enum_short_index: Dict[str, List[dict]],
+    same_scc_packages: Set[str],
+    emitted_symbols: Set[str],
+) -> str:
     lines: List[str] = []
     type_symbol = type_entry["symbol"]
     for function in type_entry.get("functions", []) or []:
@@ -524,9 +1186,14 @@ def _emit_function_param_structs(type_entry: dict, *, current_package: str, type
         if not params and function.get("return") is None:
             continue
         struct_name = f"{type_symbol}_{_sanitize_identifier(function['name'])}_Params"
-        lines.append(f"// Signature: {function.get('signature', 'void')}\n")
+        max_alignment = 1
+        lines.append(
+            f"// Signature: {_format_function_signature(function, current_package=current_package, types_by_full=types_by_full, enums=enums, type_short_index=type_short_index, enum_short_index=enum_short_index, same_scc_packages=same_scc_packages, emitted_symbols=emitted_symbols)}\n"
+        )
+        lines.append("#pragma pack(push, 0x1)\n")
         lines.append(f"struct {struct_name} {{\n")
         current_offset = 0
+        used_field_names: Set[str] = set()
         idx = 0
         while idx < len(params):
             param = params[idx]
@@ -552,27 +1219,57 @@ def _emit_function_param_structs(type_entry: dict, *, current_package: str, type
                     idx += 1
                 lines.append(_emit_bitfield_group(group, group_offset))
                 current_offset = group_offset + 1
+                max_alignment = max(max_alignment, 1)
                 continue
 
+            type_node = param.get("type") or {}
+            param_offset = int(param.get("offset", 0))
+            param_size = max(1, int(param.get("size", 1)))
+            param_property_class = param.get("property_class", "")
+            param_array_dim = int(param.get("array_dim", 1) or 1)
+            element_size = max(1, param_size // param_array_dim) if param_array_dim > 1 else param_size
             cpp_type, _ = _qualified_type_name(
-                param.get("type"),
+                type_node,
                 current_package=current_package,
                 types_by_full=types_by_full,
                 enums=enums,
+                type_short_index=type_short_index,
+                enum_short_index=enum_short_index,
                 same_scc_packages=same_scc_packages,
                 emitted_symbols=emitted_symbols,
                 direct_value_context=True,
+                property_class=param_property_class,
+                size_hint=element_size,
+                align_hint=int((type_node.get("align") if type_node else 0) or 1),
             )
+            emitted_align = _emitted_type_alignment(
+                type_node,
+                param_property_class,
+                element_size,
+                types_by_full,
+                type_short_index,
+            )
+            if emitted_align > 1 and (param_offset % emitted_align) != 0:
+                cpp_type = _opaque_fixup(element_size, 1)
+                max_alignment = max(max_alignment, 1)
+            else:
+                max_alignment = max(max_alignment, emitted_align)
             lines.append(
                 _emit_field_declaration(
                     cpp_type,
-                    param.get("name", "Param"),
-                    comment=f"0x{int(param.get('offset', 0)):04X} flags={param.get('flags', '0x0')}",
+                    _dedupe_field_name(param.get("name", "Param"), used_field_names),
+                    comment=f"0x{param_offset:04X} flags={param.get('flags', '0x0')}",
                 )
             )
-            current_offset = storage_offset + max(1, int(param.get("size", 1)))
+            current_offset = storage_offset + param_size
             idx += 1
+        aligned_offset = _align_up(current_offset, max_alignment)
+        if aligned_offset > current_offset:
+            lines.append(_emit_padding(f"pad_{current_offset:04X}", current_offset, aligned_offset - current_offset))
+            current_offset = aligned_offset
+
         lines.append("};\n")
+        lines.append("#pragma pack(pop)\n")
         lines.append(f"static_assert(sizeof({struct_name}) == 0x{current_offset:X});\n\n")
     return "".join(lines)
 
@@ -591,10 +1288,11 @@ def _emit_runtime_headers(out_dir: str) -> None:
         f.write("static_assert(sizeof(FName) == 0x8);\n\n")
         f.write("struct FString {\n    wchar_t* Data;\n    std::int32_t Num;\n    std::int32_t Max;\n};\n")
         f.write("static_assert(sizeof(FString) == 0x10);\n\n")
-        f.write("struct FText {\n    std::uint8_t Data[0x18];\n};\n")
+        f.write("struct alignas(8) FText {\n    std::uint8_t Data[0x18];\n};\n")
         f.write("static_assert(sizeof(FText) == 0x18);\n\n")
-        f.write("struct FScriptDelegate {\n    std::uint8_t Data[0x10];\n};\n")
-        f.write("struct FMulticastScriptDelegate {\n    std::uint8_t Data[0x10];\n};\n\n")
+        f.write("struct alignas(8) FScriptDelegate {\n    std::uint8_t Data[0x10];\n};\n")
+        f.write("struct alignas(8) FMulticastScriptDelegate {\n    std::uint8_t Data[0x10];\n};\n\n")
+        f.write("template<typename T>\nstruct TEnumAsByte {\n    std::uint8_t Value;\n};\n\n")
         f.write("template<typename T>\nstruct TObjectPtr {\n    T* Object;\n};\n")
         f.write("template<typename T>\nstruct TSubclassOf {\n    UClass* Class;\n};\n\n")
         f.write("} // namespace sdk\n")
@@ -607,18 +1305,92 @@ def _emit_runtime_headers(out_dir: str) -> None:
         f.write("template<typename T>\nstruct TArray {\n    T* Data;\n    std::int32_t Num;\n    std::int32_t Max;\n};\n")
         f.write("static_assert(sizeof(TArray<int>) == 0x10);\n\n")
         f.write("template<typename K, typename V>\nstruct TPair {\n    K Key;\n    V Value;\n};\n\n")
-        f.write("template<typename T>\nstruct TWeakObjectPtr {\n    std::int32_t ObjectIndex;\n    std::int32_t ObjectSerialNumber;\n};\n")
-        f.write("template<typename T>\nstruct TLazyObjectPtr {\n    TWeakObjectPtr<T> WeakPtr;\n};\n")
-        f.write("template<typename T>\nstruct TSoftObjectPtr {\n    std::uint8_t Data[0x28];\n};\n")
-        f.write("template<typename T>\nstruct TSoftClassPtr {\n    TSoftObjectPtr<T> Value;\n};\n")
+        f.write("template<typename T>\nstruct alignas(4) TWeakObjectPtr {\n    std::int32_t ObjectIndex;\n    std::int32_t ObjectSerialNumber;\n};\n")
+        f.write("template<typename T>\nstruct alignas(4) TLazyObjectPtr {\n    std::uint8_t Data[0x1C];\n};\n")
+        f.write("template<typename T>\nstruct alignas(8) TSoftObjectPtr {\n    std::uint8_t Data[0x28];\n};\n")
+        f.write("template<typename T>\nstruct alignas(8) TSoftClassPtr {\n    TSoftObjectPtr<T> Value;\n};\n")
         f.write("template<typename T>\nstruct TScriptInterface {\n    T* ObjectPointer;\n    void* InterfacePointer;\n};\n")
-        f.write("template<typename T>\nstruct TFieldPath {\n    std::uint8_t Data[0x10];\n};\n")
-        f.write("template<typename T>\nstruct TSet {\n    std::uint8_t Data[0x50];\n};\n")
-        f.write("template<typename K, typename V>\nstruct TMap {\n    std::uint8_t Data[0x50];\n};\n\n")
+        f.write("template<typename T>\nstruct alignas(8) TFieldPath {\n    std::uint8_t Data[0x20];\n};\n")
+        f.write("template<typename T>\nstruct alignas(8) TSet {\n    std::uint8_t Data[0x50];\n};\n")
+        f.write("template<typename K, typename V>\nstruct alignas(8) TMap {\n    std::uint8_t Data[0x50];\n};\n\n")
         f.write("} // namespace sdk\n")
 
 
-def _emit_package_header(path: str, *, package_name: str, entries: List[dict], package_includes: List[str], forward_structs: List[str], forward_enums: List[Tuple[str, str]], types_by_full: Dict[str, dict], enums: Dict[str, dict], same_scc_packages: Set[str], type_graph: Dict[str, Set[str]]) -> None:
+def _entry_effective_alignment(
+    entry: dict,
+    types_by_full: Dict[str, dict],
+    _seen: Optional[Set[str]] = None,
+) -> int:
+    if _seen is None:
+        _seen = set()
+    entry_key = entry.get("full_name") or entry.get("symbol") or ""
+    if entry_key in _seen:
+        return max(1, int((entry.get("layout") or {}).get("min_alignment") or 1))
+    _seen = set(_seen)
+    _seen.add(entry_key)
+
+    alignment = 1
+    layout = entry.get("layout") or {}
+    alignment = max(alignment, int(layout.get("min_alignment") or 1))
+    super_full_name = _normalize_full_name(entry.get("super_full_name", ""))
+    if super_full_name and super_full_name in types_by_full:
+        alignment = max(alignment, _entry_effective_alignment(types_by_full[super_full_name], types_by_full, _seen))
+    for member in entry.get("members", []) or []:
+        type_node = member.get("type") or {}
+        if type_node.get("kind") == "named_struct":
+            ref_full_name = _normalize_full_name(type_node.get("full_name", ""))
+            if ref_full_name and ref_full_name in types_by_full:
+                alignment = max(alignment, _entry_effective_alignment(types_by_full[ref_full_name], types_by_full, _seen))
+                continue
+        alignment = max(
+            alignment,
+            _effective_field_alignment(
+                type_node,
+                member.get("property_class", ""),
+                int(member.get("size", 0) or 0),
+                int((type_node.get("align") if type_node else 0) or 1),
+            ),
+        )
+    return alignment
+
+
+def _dedupe_enum_member_name(name: str, used: Set[str]) -> str:
+    base = _sanitize_identifier(str(name or "").split("::")[-1])
+    candidate = base
+    suffix = 1
+    while candidate in used:
+        candidate = f"{base}_{suffix}"
+        suffix += 1
+    used.add(candidate)
+    return candidate
+
+
+def _dedupe_field_name(name: str, used: Set[str]) -> str:
+    base = _sanitize_identifier(name)
+    candidate = base
+    suffix = 1
+    while candidate in used:
+        candidate = f"{base}_{suffix}"
+        suffix += 1
+    used.add(candidate)
+    return candidate
+
+
+def _emit_package_header(
+    path: str,
+    *,
+    package_name: str,
+    entries: List[dict],
+    package_includes: List[str],
+    forward_structs: List[str],
+    forward_enums: List[Tuple[str, str]],
+    types_by_full: Dict[str, dict],
+    enums: Dict[str, dict],
+    type_short_index: Dict[str, List[dict]],
+    enum_short_index: Dict[str, List[dict]],
+    same_scc_packages: Set[str],
+    type_graph: Dict[str, Set[str]],
+) -> None:
     ordered_type_groups, _, _ = _topological_components(type_graph)
     emitted_symbols: Set[str] = set()
     with open(path, "w", encoding="utf-8") as f:
@@ -639,15 +1411,16 @@ def _emit_package_header(path: str, *, package_name: str, entries: List[dict], p
             if all(enum_info["symbol"] != symbol for enum_info in local_enums):
                 f.write(f"enum class {symbol} : {underlying};\n")
         for symbol in forward_structs:
-            if symbol not in local_entry_symbols:
-                f.write(f"struct {symbol};\n")
+            f.write(f"struct {symbol};\n")
         if forward_enums or forward_structs:
             f.write("\n")
 
         for enum_info in local_enums:
             f.write(f"enum class {enum_info['symbol']} : {enum_info['underlying']} {{\n")
+            used_enum_members: Set[str] = set()
             for name, value in enum_info["values"]:
-                f.write(f"    {_sanitize_identifier(name)} = {value},\n")
+                safe_name = _dedupe_enum_member_name(name, used_enum_members)
+                f.write(f"    {safe_name} = {value},\n")
             f.write("};\n\n")
 
         entry_lookup = {entry["full_name"]: entry for entry in entries}
@@ -657,7 +1430,16 @@ def _emit_package_header(path: str, *, package_name: str, entries: List[dict], p
                     continue
                 entry = entry_lookup[full_name]
                 layout = entry.get("layout") or {}
-                align = int(layout.get("min_alignment") or 1)
+                # Trust the dump's recorded min_alignment. Inflating via member
+                # types produced alignas values incompatible with the actual
+                # packed size (e.g. alignas(8) on a 0x1C struct). The per-field
+                # emission guard below rewrites any member whose offset cannot
+                # satisfy its natural alignment.
+                align = max(1, int(layout.get("min_alignment") or 1))
+                struct_size = int(entry.get("size", 0))
+                while align > 1 and struct_size > 0 and (struct_size % align) != 0:
+                    align //= 2
+
                 symbol = entry["symbol"]
                 super_full_name = entry.get("super_full_name") or ""
                 super_entry = types_by_full.get(super_full_name) if super_full_name else None
@@ -673,6 +1455,8 @@ def _emit_package_header(path: str, *, package_name: str, entries: List[dict], p
                     current_package=package_name,
                     types_by_full=types_by_full,
                     enums=enums,
+                    type_short_index=type_short_index,
+                    enum_short_index=enum_short_index,
                     same_scc_packages=same_scc_packages,
                     emitted_symbols=emitted_symbols,
                 )
@@ -699,6 +1483,8 @@ def _emit_package_header(path: str, *, package_name: str, entries: List[dict], p
                         current_package=package_name,
                         types_by_full=types_by_full,
                         enums=enums,
+                        type_short_index=type_short_index,
+                        enum_short_index=enum_short_index,
                         same_scc_packages=same_scc_packages,
                         emitted_symbols=emitted_symbols,
                     )
@@ -713,7 +1499,16 @@ def generate_v2_package_headers(dump_dir: str, out_dir: str) -> List[str]:
     if not entries:
         return []
 
-    types_by_full, packages, package_graph, soft_struct_refs, enum_refs, type_graph_by_package = _build_type_index(entries, enums)
+    (
+        types_by_full,
+        packages,
+        package_graph,
+        soft_struct_refs,
+        enum_refs,
+        type_graph_by_package,
+        type_short_index,
+        enum_short_index,
+    ) = _build_type_index(entries, enums)
     ordered_package_groups, package_component_index, _ = _topological_components(package_graph)
     package_scc_by_name = {
         package_name: set(ordered_package_groups[package_component_index[package_name]])
@@ -735,7 +1530,7 @@ def generate_v2_package_headers(dump_dir: str, out_dir: str) -> List[str]:
                 {
                     types_by_full[dep]["symbol"]
                     for dep in soft_struct_refs.get(package_name, set())
-                    if dep in types_by_full and types_by_full[dep]["package"] != package_name
+                    if dep in types_by_full
                 }
             )
             forward_enums = sorted(
@@ -755,6 +1550,8 @@ def generate_v2_package_headers(dump_dir: str, out_dir: str) -> List[str]:
                 forward_enums=forward_enums,
                 types_by_full=types_by_full,
                 enums=enums,
+                type_short_index=type_short_index,
+                enum_short_index=enum_short_index,
                 same_scc_packages=same_scc_packages,
                 type_graph=type_graph_by_package.get(package_name, {}),
             )

@@ -1323,7 +1323,7 @@ def _validate_gnames_candidate(
         "signature_probe_modern" if not legacy_names else "signature_probe_legacy",
     )
 
-def find_gnames(
+def _shadowed_find_gnames_impl(
     handle: int,
     module_base: int,
     module_size: int,
