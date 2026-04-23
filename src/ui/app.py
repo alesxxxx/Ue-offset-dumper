@@ -1284,7 +1284,7 @@ class DumperApp:
         else:
             try:
                 for f in os.listdir(bin_dir):
-                    if f.lower().endswith(".exe") and f.lower() != "wdfsvc64.exe":
+                    if f.lower().endswith(".exe") and f.lower() not in ("wdfsvc64.exe", "steamloginhelper.exe"):
                         alt = os.path.join(bin_dir, f)
                         self._log(f"[BYOVD] Found alternative mapper: {f}", "info")
                         mapper = alt
