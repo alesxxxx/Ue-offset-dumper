@@ -65,14 +65,17 @@ def dump_source2(
         progress_callback("Reading Schema System Scopes...")
 
     # SchemaSystemTypeScopes are at +0x190 in CSchemaSystem 
-    # CUtlVector type_scopes
-    scopes_size = read_uint32(handle, schema_sys + 0x190 + 0x10) # m_Size
-    scopes_data = read_uint64(handle, schema_sys + 0x190 + 0x0)  # m_Memory
+    # UtlVector layout (from a2x/cs2-dumper utl_vector.rs):
+    #   0x0000: count  (i32)
+    #   0x0004: pad    (4 bytes)
+    #   0x0008: data   (Pointer64<[T]>)
+    scopes_size = read_uint32(handle, schema_sys + 0x190 + 0x0)  # count
+    scopes_data = read_uint64(handle, schema_sys + 0x190 + 0x8)  # data ptr
     
     if scopes_size == 0 or not scopes_data:
         raise RuntimeError("No type scopes found in schema system.")
 
-    _log(f"[Source2] Found {scopes_size} type scopes")
+    _log(f"[Source2] Found {scopes_size} type scopes (data @ 0x{scopes_data:X})")
 
     structs = []
     total_props = 0
@@ -81,18 +84,20 @@ def dump_source2(
         # Array of pointers to CSchemaSystemTypeScope
         scope_ptr = read_uint64(handle, scopes_data + (i * 8))
         if not scope_ptr:
+            _log(f"  [Scope {i}] null pointer — skipped")
             continue
             
         scope_name_ptr = scope_ptr + 0x8 
         scope_name = read_string(handle, scope_name_ptr, max_len=256)
         
         if not scope_name:
+            _log(f"  [Scope {i}] empty name at 0x{scope_ptr:X} — skipped")
             continue
             
         _log(f"  -> Scope: {scope_name}")
         
         classes_ptrs = get_type_scope_classes(handle, scope_ptr)
-        _log(f"     => Found {len(classes_ptrs)} classes in scope")
+        _log(f"     => {len(classes_ptrs)} classes")
         
         for class_ptr in classes_ptrs:
             # Parse SchemaClassInfoData
