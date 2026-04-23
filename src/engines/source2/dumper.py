@@ -35,16 +35,31 @@ def dump_source2(
 
     # Pattern scan for CSchemaSystem
     from src.engines.source2.signatures import find_schema_system_ptr
-    schema_sys_ptr = find_schema_system_ptr(handle, schema_base, schema_size)
+    schema_sys = find_schema_system_ptr(handle, schema_base, schema_size)
     
-    if not schema_sys_ptr:
-        raise RuntimeError("Could not find CSchemaSystem pointer.")
-
-    schema_sys = read_uint64(handle, schema_sys_ptr)
     if not schema_sys:
-        raise RuntimeError("Could not dereference CSchemaSystem.")
+        raise RuntimeError("Could not find CSchemaSystem pattern in schemasystem.dll.")
 
-    _log(f"[Source2] CSchemaSystem: 0x{schema_sys:X}")
+    # Sanity check: the primary pattern (lea) resolves directly to the struct.
+    # If the address looks like a valid pointer (very high value), it might be the
+    # struct itself. If the first qword at the address looks like another pointer,
+    # we may need to dereference. We try reading the type_scopes count at +0x1A0
+    # to validate which interpretation is correct.
+    test_count = read_uint32(handle, schema_sys + 0x190 + 0x10)
+    if test_count == 0 or test_count > 256:
+        # Maybe we got a pointer TO the struct, not the struct itself — dereference
+        deref = read_uint64(handle, schema_sys)
+        if deref:
+            test2 = read_uint32(handle, deref + 0x190 + 0x10)
+            if 0 < test2 <= 256:
+                schema_sys = deref
+                _log(f"[Source2] CSchemaSystem (dereferenced): 0x{schema_sys:X}")
+            else:
+                _log(f"[Source2] CSchemaSystem: 0x{schema_sys:X} (direct)")
+        else:
+            _log(f"[Source2] CSchemaSystem: 0x{schema_sys:X} (direct, unvalidated)")
+    else:
+        _log(f"[Source2] CSchemaSystem: 0x{schema_sys:X}")
 
     if progress_callback:
         progress_callback("Reading Schema System Scopes...")
