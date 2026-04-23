@@ -4943,7 +4943,7 @@ class DumperApp:
         if engine in ("ue", "source", "source2"):
             self.scan_btn.pack(side=tk.LEFT, padx=(0, 6))
             
-        if engine not in ("source",):
+        if engine not in ("source", "source2"):
             self.sdk_btn.pack(side=tk.LEFT, padx=(0, 6))
 
     def _copy_offset(self, key: str):
