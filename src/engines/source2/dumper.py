@@ -86,11 +86,10 @@ def dump_source2(
         scope_name_ptr = scope_ptr + 0x8 
         scope_name = read_string(handle, scope_name_ptr, max_len=256)
         
-        # Only dump client.dll types for this typical dumper
-        if scope_name != "client.dll":
+        if not scope_name:
             continue
             
-        _log(f"  -> Found scope: {scope_name}")
+        _log(f"  -> Scope: {scope_name}")
         
         classes_ptrs = get_type_scope_classes(handle, scope_ptr)
         _log(f"     => Found {len(classes_ptrs)} classes in scope")

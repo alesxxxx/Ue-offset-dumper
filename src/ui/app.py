@@ -6162,6 +6162,10 @@ class DumperApp:
                 self._run_avm2_dump()
             elif engine == "r6s":
                 self._run_r6s_dump()
+            elif engine == "source2":
+                self._run_source2_scan()
+            elif engine == "source":
+                self._run_source_scan()
             else:
                 self._run_ue_dump()
         except Exception as e:
