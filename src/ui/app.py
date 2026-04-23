@@ -5452,11 +5452,34 @@ class DumperApp:
                     pe_timestamp=0,
                 )
 
+                from src.output.source2_writer import (
+                    write_source2_header, write_source2_sdk,
+                )
+                header_path = os.path.join(output_dir, "cs2_schemas.hpp")
+                write_source2_header(
+                    header_path,
+                    sdk_dump,
+                    process_name=self.process_name,
+                )
+
+                sdk_output_dir = (
+                    os.path.join(os.path.dirname(output_dir), "SDK")
+                    if os.path.basename(output_dir).lower() == "offsets"
+                    else os.path.join(output_dir, "SDK")
+                )
+                write_source2_sdk(
+                    sdk_output_dir,
+                    sdk_dump,
+                    process_name=self.process_name,
+                )
+
                 self._set_progress(100)
                 total_structs = len(sdk_dump.structs)
                 total_props = sum(len(s.members) for s in sdk_dump.structs)
                 self._log(f"[Source2] Done \u2014 {total_structs} structs, {total_props} fields", "ok")
-                self._log(f"  Saved to: {output_dir}", "ok")
+                self._log(f"  Saved: {output_dir}", "ok")
+                self._log(f"  Saved: {header_path}", "ok")
+                self._log(f"  Saved: {sdk_output_dir}", "ok")
                 self._set_status("Source 2 dump complete!", GREEN)
                 self._set_info("objects", f"{total_structs:,} structs", FG)
 

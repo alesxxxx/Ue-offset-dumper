@@ -61,13 +61,24 @@ def _run_source2(args):
 
     print(f"\n[3/3] Writing output to {output_dir}/...")
     source2_write_all(
-        output_dir, 
-        dump, 
-        0, 0, 0, 
-        process_name=process_name, 
-        engine="source2", 
+        output_dir,
+        dump,
+        0, 0, 0,
+        process_name=process_name,
+        engine="source2",
         pe_timestamp=0
     )
+
+    from src.output.source2_writer import write_source2_header, write_source2_sdk
+    header_path = os.path.join(output_dir, "cs2_schemas.hpp")
+    write_source2_header(header_path, dump, process_name=process_name)
+
+    sdk_output_dir = (
+        os.path.join(os.path.dirname(output_dir), "SDK")
+        if os.path.basename(output_dir).lower() == "offsets"
+        else os.path.join(output_dir, "SDK")
+    )
+    write_source2_sdk(sdk_output_dir, dump, process_name=process_name)
 
     total_size = 0
     for f in os.listdir(output_dir):

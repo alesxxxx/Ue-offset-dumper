@@ -80,7 +80,7 @@ echo          %MSBUILD%
 echo.
 
 echo   +------------------------------------------+
-echo   ^|  Step 1 / 3  --  Kernel Driver          ^|
+echo   ^|  Step 1 / 4  --  Kernel Driver          ^|
 echo   +------------------------------------------+
 echo.
 
