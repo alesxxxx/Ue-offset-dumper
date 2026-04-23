@@ -14,6 +14,7 @@ Primary focus is Unreal Engine — tested against UE 4.22 through UE 5.5 across 
 | Unity IL2CPP | global-metadata.dat parser + PE scanner | Confirmed working |
 | Unity Mono | Managed assembly reflection | Confirmed working |
 | Source Engine | Netvar scanner | TF2 / L4D2 (Source 1) |
+| Source 2 Engine | Schema scanner | Counter-Strike 2 (CS2) |
 
 ---
 
@@ -110,6 +111,7 @@ Unreal Engine titles tested and verified:
 - Manor Lords (UE 5.5)
 - Medieval Dynasty (UE 4.27)
 - Half Sword (UE 5)
+- Counter-Strike 2 (Source 2)
 - VRising (Unity IL2CPP)
 - 9Kings (Unity IL2CPP)
 - Project Tower (UE)
@@ -128,6 +130,7 @@ src/
     il2cpp/     Unity IL2CPP metadata parser
     mono/       Unity Mono assembly dumper
     source/     Source engine netvar scanner
+    source2/    Source 2 schema scanner
   ui/           GUI (app.py) and CLI (cli.py)
   output/       JSON writer, SDK generator, template generator
 driver/         Kernel driver source (KMDF, C)
