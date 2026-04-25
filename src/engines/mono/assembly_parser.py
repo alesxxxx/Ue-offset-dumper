@@ -356,6 +356,19 @@ def parse_assembly(path: str) -> List[TypeInfo]:
 def parse_managed_dir(managed_dir: str, game_only: bool = True) -> List[TypeInfo]:
     all_types: List[TypeInfo] = []
 
+    if not _HAS_DNFILE:
+        try:
+            import tkinter.messagebox
+            tkinter.messagebox.showerror(
+                "Dependency Missing",
+                "The 'dnfile' python package is strictly required to parse Mono assemblies.\n\n"
+                "Please run 'pip install dnfile' in your terminal, or re-run Build.bat to bundle it automatically."
+            )
+        except Exception:
+            pass
+        print("[!!] FATAL: dnfile not installed! Cannot parse managed .NET assemblies.")
+        return all_types
+
     if not os.path.isdir(managed_dir):
         print(f"[!!] Managed directory not found: {managed_dir}")
         return all_types

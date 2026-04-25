@@ -42,6 +42,12 @@ if errorlevel 1 (
         exit /b 1
     )
 )
+
+python -c "import dnfile" >nul 2>nul
+if errorlevel 1 (
+    echo   [AUTO]  dnfile not found -- installing...
+    pip install dnfile >nul 2>&1
+)
 for /f "delims=" %%v in ('python -c "import PyInstaller; print(PyInstaller.__version__)" 2^>^&1') do set "PIVER=%%v"
 echo   [ OK ]  PyInstaller v%PIVER%
 
@@ -204,6 +210,7 @@ pyinstaller --noconfirm --onefile --windowed --log-level WARN ^
     --hidden-import "src.engines.ue.gobjects" ^
     --hidden-import "src.engines.ue.gworld" ^
     --hidden-import "src.engines.ue.signatures" ^
+    --hidden-import "dnfile" ^
     --hidden-import "src.engines.ue.sdk_walker" ^
     --hidden-import "src.engines.il2cpp.metadata" ^
     --hidden-import "src.engines.il2cpp.pe_scanner" ^
