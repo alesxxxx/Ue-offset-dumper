@@ -66,6 +66,28 @@ class MonoExecutor:
         total = len(self.types)
         structs_found = enums_found = 0
 
+        # Diagnostic: count types with/without fields
+        with_fields = sum(1 for t in self.types if t.fields)
+        with_enum_vals = sum(1 for t in self.types if t.is_enum and (t.enum_values or t.fields))
+        print(f"[DEBUG] Mono executor: {total} types, {with_fields} have fields, {with_enum_vals} are enums with values")
+        for t in self.types[:5]:
+            print(f"[DEBUG]   {t.full_name}: fields={len(t.fields)}, is_enum={t.is_enum}, enum_vals={len(t.enum_values)}")
+
+        # Write diagnostic to file for GUI-invisible debugging
+        try:
+            import os
+            diag_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "mono_debug.log")
+            with open(diag_path, "w") as df:
+                df.write(f"Total types: {total}\n")
+                df.write(f"Types with fields: {with_fields}\n")
+                df.write(f"Enums with values: {with_enum_vals}\n\n")
+                for t in self.types[:20]:
+                    df.write(f"{t.full_name}: fields={len(t.fields)}, methods={len(t.methods)}, is_enum={t.is_enum}, parent={t.parent_name}\n")
+                    for f in t.fields[:5]:
+                        df.write(f"  field: {f.name} ({f.type_name})\n")
+        except Exception:
+            pass
+
         for i, ti in enumerate(self.types):
             if progress_callback and i % 200 == 0:
                 progress_callback(i, total)

@@ -73,6 +73,7 @@ def _parse_with_dnfile(path: str) -> List[TypeInfo]:
     fd_rows = list(fd_table) if fd_table else []
     md_rows = list(md_table) if md_table else []
 
+    _logged_fieldlist_type = False
     for i, row in enumerate(td_rows):
         name = str(getattr(row, "TypeName", "")) or ""
         namespace = str(getattr(row, "TypeNamespace", "")) or ""
@@ -95,7 +96,24 @@ def _parse_with_dnfile(path: str) -> List[TypeInfo]:
         enum_values = []
         
         field_list_obj = getattr(row, "FieldList", None)
-        if isinstance(field_list_obj, list) or (hasattr(field_list_obj, "__iter__") and not hasattr(field_list_obj, "row_index") and not isinstance(field_list_obj, str)):
+        if not _logged_fieldlist_type:
+            _logged_fieldlist_type = True
+            try:
+                import os as _fos
+                _diag = _fos.path.join(_fos.path.dirname(_fos.path.abspath(__file__)), "..", "..", "..", "mono_debug.log")
+                with open(_diag, "a") as _df:
+                    _df.write(f"FieldList type: {type(field_list_obj).__name__}\n")
+                    _df.write(f"  is_list={isinstance(field_list_obj, list)}\n")
+                    _df.write(f"  has_iter={hasattr(field_list_obj, '__iter__')}\n")
+                    _df.write(f"  has_row_index={hasattr(field_list_obj, 'row_index')}\n")
+                    _df.write(f"  has_value={hasattr(field_list_obj, 'value')}\n")
+                    _df.write(f"  has_table={hasattr(field_list_obj, 'table')}\n")
+                    _df.write(f"  repr={repr(field_list_obj)[:300]}\n")
+                    _df.write(f"  dir={[a for a in dir(field_list_obj) if not a.startswith('_')]}\n")
+                    _df.write(f"  fd_rows count={len(fd_rows)}\n\n")
+            except Exception:
+                pass
+        if isinstance(field_list_obj, list) or (hasattr(field_list_obj, "__iter__") and not hasattr(field_list_obj, "row_index") and not isinstance(field_list_obj, str) and not hasattr(field_list_obj, "value") and not hasattr(field_list_obj, "table")):
             # Native dnfile resolved list of Field rows
             for fi, fd_row in enumerate(field_list_obj):
                 fname = str(getattr(fd_row, "Name", "")) or ""
