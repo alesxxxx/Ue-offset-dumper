@@ -70,62 +70,113 @@ def _parse_with_dnfile(path: str) -> List[TypeInfo]:
 
         is_enum = parent_name == "Enum" or parent_name == "System.Enum"
 
-        field_start = getattr(row, "FieldList", None)
-        if field_start and hasattr(field_start, "row_index"):
-            f_start_idx = field_start.row_index - 1
-        else:
-            f_start_idx = 0
-
-        if i + 1 < len(td_rows):
-            next_fl = getattr(td_rows[i + 1], "FieldList", None)
-            if next_fl and hasattr(next_fl, "row_index"):
-                f_end_idx = next_fl.row_index - 1
-            else:
-                f_end_idx = len(fd_rows)
-        else:
-            f_end_idx = len(fd_rows)
-
+        # ---------------- Fields ----------------
         fields = []
         enum_values = []
-        for fi in range(f_start_idx, min(f_end_idx, len(fd_rows))):
-            fd_row = fd_rows[fi]
-            fname = str(getattr(fd_row, "Name", "")) or ""
-            if not fname:
-                continue
-            ftype = _get_field_type_str(fd_row)
-            fields.append(FieldInfo(name=fname, type_name=ftype))
+        
+        field_list_obj = getattr(row, "FieldList", None)
+        if isinstance(field_list_obj, list) or (hasattr(field_list_obj, "__iter__") and not hasattr(field_list_obj, "row_index") and not isinstance(field_list_obj, str)):
+            # Native dnfile resolved list of Field rows
+            for fi, fd_row in enumerate(field_list_obj):
+                fname = str(getattr(fd_row, "Name", "")) or ""
+                if not fname:
+                    continue
+                ftype = _get_field_type_str(fd_row)
+                fields.append(FieldInfo(name=fname, type_name=ftype))
 
-            if is_enum and fname != "value__":
-                const_val = getattr(fd_row, "Constant", None)
-                if const_val is not None:
-                    try:
-                        enum_values.append((fname, int(const_val)))
-                    except (TypeError, ValueError):
+                if is_enum and fname != "value__":
+                    const_val = getattr(fd_row, "Constant", None)
+                    if const_val is not None:
+                        try:
+                            enum_values.append((fname, int(const_val)))
+                        except (TypeError, ValueError):
+                            enum_values.append((fname, fi))
+                    else:
+                        enum_values.append((fname, fi))
+        else:
+            # Fallback to index-based for older dnfile or unresolved references
+            field_start = getattr(row, "FieldList", None)
+            f_start_idx = len(fd_rows)
+            if field_start is not None:
+                if hasattr(field_start, "row_index"):
+                    f_start_idx = field_start.row_index - 1
+                elif isinstance(field_start, int):
+                    f_start_idx = field_start - 1
+                elif hasattr(field_start, "__int__"):
+                    f_start_idx = int(field_start) - 1
+
+            f_end_idx = len(fd_rows)
+            for j in range(i + 1, len(td_rows)):
+                nxt = getattr(td_rows[j], "FieldList", None)
+                if nxt is not None:
+                    if hasattr(nxt, "row_index"):
+                        f_end_idx = nxt.row_index - 1
+                        break
+                    elif isinstance(nxt, int):
+                        f_end_idx = nxt - 1
+                        break
+                    elif hasattr(nxt, "__int__"):
+                        f_end_idx = int(nxt) - 1
+                        break
+
+            for fi in range(f_start_idx, min(f_end_idx, len(fd_rows))):
+                fd_row = fd_rows[fi]
+                fname = str(getattr(fd_row, "Name", "")) or ""
+                if not fname:
+                    continue
+                ftype = _get_field_type_str(fd_row)
+                fields.append(FieldInfo(name=fname, type_name=ftype))
+
+                if is_enum and fname != "value__":
+                    const_val = getattr(fd_row, "Constant", None)
+                    if const_val is not None:
+                        try:
+                            enum_values.append((fname, int(const_val)))
+                        except (TypeError, ValueError):
+                            enum_values.append((fname, fi - f_start_idx))
+                    else:
                         enum_values.append((fname, fi - f_start_idx))
-                else:
-                    enum_values.append((fname, fi - f_start_idx))
 
-        method_start = getattr(row, "MethodList", None)
-        if method_start and hasattr(method_start, "row_index"):
-            m_start_idx = method_start.row_index - 1
-        else:
-            m_start_idx = 0
-
-        if i + 1 < len(td_rows):
-            next_ml = getattr(td_rows[i + 1], "MethodList", None)
-            if next_ml and hasattr(next_ml, "row_index"):
-                m_end_idx = next_ml.row_index - 1
-            else:
-                m_end_idx = len(md_rows)
-        else:
-            m_end_idx = len(md_rows)
-
+        # ---------------- Methods ----------------
         methods = []
-        for mi in range(m_start_idx, min(m_end_idx, len(md_rows))):
-            md_row = md_rows[mi]
-            mname = str(getattr(md_row, "Name", "")) or ""
-            if mname:
-                methods.append(MethodInfo(name=mname, return_type=""))
+        method_list_obj = getattr(row, "MethodList", None)
+        if isinstance(method_list_obj, list) or (hasattr(method_list_obj, "__iter__") and not hasattr(method_list_obj, "row_index") and not isinstance(method_list_obj, str)):
+            # Native dnfile resolved list of Method rows
+            for md_row in method_list_obj:
+                mname = str(getattr(md_row, "Name", "")) or ""
+                if mname:
+                    methods.append(MethodInfo(name=mname, return_type=""))
+        else:
+            method_start = getattr(row, "MethodList", None)
+            m_start_idx = len(md_rows)
+            if method_start is not None:
+                if hasattr(method_start, "row_index"):
+                    m_start_idx = method_start.row_index - 1
+                elif isinstance(method_start, int):
+                    m_start_idx = method_start - 1
+                elif hasattr(method_start, "__int__"):
+                    m_start_idx = int(method_start) - 1
+
+            m_end_idx = len(md_rows)
+            for j in range(i + 1, len(td_rows)):
+                nxt = getattr(td_rows[j], "MethodList", None)
+                if nxt is not None:
+                    if hasattr(nxt, "row_index"):
+                        m_end_idx = nxt.row_index - 1
+                        break
+                    elif isinstance(nxt, int):
+                        m_end_idx = nxt - 1
+                        break
+                    elif hasattr(nxt, "__int__"):
+                        m_end_idx = int(nxt) - 1
+                        break
+
+            for mi in range(m_start_idx, min(m_end_idx, len(md_rows))):
+                md_row = md_rows[mi]
+                mname = str(getattr(md_row, "Name", "")) or ""
+                if mname:
+                    methods.append(MethodInfo(name=mname, return_type=""))
+
 
         is_class = parent_name not in ("ValueType", "Enum", "System.ValueType", "System.Enum")
 
