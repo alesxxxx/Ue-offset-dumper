@@ -3045,6 +3045,792 @@ target_compile_definitions(cheat_client PRIVATE
 target_link_libraries(cheat_client PRIVATE d3d11 dxgi d3dcompiler dwmapi winmm)
 """
 
+_TPL_ADMIN_OVERLAY_CPP = r'''#include "overlay.hpp"
+#include "backends/imgui_impl_dx11.h"
+#include "backends/imgui_impl_win32.h"
+#include "imgui.h"
+#include <timeapi.h>
+
+#pragma comment(lib, "d3d11.lib")
+#pragma comment(lib, "dxgi.lib")
+#pragma comment(lib, "winmm.lib")
+
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM,
+                                                             LPARAM);
+
+namespace nova::overlay {
+
+static HWND g_hwnd = nullptr;
+static ID3D11Device *g_device = nullptr;
+static ID3D11DeviceContext *g_context = nullptr;
+static IDXGISwapChain *g_swap = nullptr;
+static ID3D11RenderTargetView *g_rtv = nullptr;
+static float g_width = 1920.0f;
+static float g_height = 1080.0f;
+static float g_target_x = 0.0f;
+static float g_target_y = 0.0f;
+static bool g_click_through = true;
+
+static LRESULT WINAPI WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+  if (ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp))
+    return 1;
+  if (msg == WM_DESTROY) {
+    PostQuitMessage(0);
+    return 0;
+  }
+  return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+bool Create(HINSTANCE instance) {
+  WNDCLASSEXW wc = {sizeof(wc),
+                    CS_HREDRAW | CS_VREDRAW,
+                    WndProc,
+                    0,
+                    0,
+                    instance,
+                    nullptr,
+                    nullptr,
+                    nullptr,
+                    nullptr,
+                    L"NOVAOverlay",
+                    nullptr};
+  RegisterClassExW(&wc);
+
+  g_hwnd = CreateWindowExW(
+      WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_TOOLWINDOW |
+          WS_EX_NOACTIVATE,
+      wc.lpszClassName, L"NOVA", WS_POPUP, 0, 0, GetSystemMetrics(SM_CXSCREEN),
+      GetSystemMetrics(SM_CYSCREEN), nullptr, nullptr, instance, nullptr);
+  if (!g_hwnd)
+    return false;
+
+  SetLayeredWindowAttributes(g_hwnd, RGB(0, 0, 0), 0, LWA_COLORKEY);
+  MARGINS margins = {-1};
+  DwmExtendFrameIntoClientArea(g_hwnd, &margins);
+
+  DXGI_SWAP_CHAIN_DESC sd = {};
+  sd.BufferCount = 2;
+  sd.BufferDesc.Width = GetSystemMetrics(SM_CXSCREEN);
+  sd.BufferDesc.Height = GetSystemMetrics(SM_CYSCREEN);
+  sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+  sd.OutputWindow = g_hwnd;
+  sd.SampleDesc.Count = 1;
+  sd.Windowed = TRUE;
+  sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+
+  D3D_FEATURE_LEVEL fl[] = {D3D_FEATURE_LEVEL_11_0};
+  D3D_FEATURE_LEVEL fl_out;
+  if (FAILED(D3D11CreateDeviceAndSwapChain(
+          nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, fl, 1,
+          D3D11_SDK_VERSION, &sd, &g_swap, &g_device, &fl_out, &g_context))) {
+    DestroyWindow(g_hwnd);
+    return false;
+  }
+
+  ID3D11Texture2D *bb = nullptr;
+  g_swap->GetBuffer(0, IID_PPV_ARGS(&bb));
+  g_device->CreateRenderTargetView(bb, nullptr, &g_rtv);
+  bb->Release();
+
+  g_width = static_cast<float>(sd.BufferDesc.Width);
+  g_height = static_cast<float>(sd.BufferDesc.Height);
+
+  ShowWindow(g_hwnd, SW_SHOWDEFAULT);
+  UpdateWindow(g_hwnd);
+
+  // Set timer resolution to 1ms so Sleep(1) actually sleeps ~1ms instead
+  // of 15.6ms
+  timeBeginPeriod(1);
+
+  IMGUI_CHECKVERSION();
+  ImGui::CreateContext();
+  ImGui_ImplWin32_Init(g_hwnd);
+  ImGui_ImplDX11_Init(g_device, g_context);
+
+  return true;
+}
+
+void Destroy() {
+  timeEndPeriod(1);
+  ImGui_ImplDX11_Shutdown();
+  ImGui_ImplWin32_Shutdown();
+  ImGui::DestroyContext();
+  if (g_rtv)
+    g_rtv->Release();
+  if (g_swap)
+    g_swap->Release();
+  if (g_context)
+    g_context->Release();
+  if (g_device)
+    g_device->Release();
+  if (g_hwnd)
+    DestroyWindow(g_hwnd);
+}
+
+bool BeginFrame() {
+  MSG msg;
+  while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
+    TranslateMessage(&msg);
+    DispatchMessage(&msg);
+    if (msg.message == WM_QUIT)
+      return false;
+  }
+  ImGui_ImplDX11_NewFrame();
+  ImGui_ImplWin32_NewFrame();
+  ImGui::NewFrame();
+  return true;
+}
+
+void EndFrame() {
+  ImGui::Render();
+  const float clear[4] = {0.0f, 0.0f, 0.0f, 0.0f}; // Fully transparent
+  g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
+  g_context->ClearRenderTargetView(g_rtv, clear);
+  ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+  g_swap->Present(
+      0, 0); // VSync disabled to prevent DWM lag on transparent overlays
+  Sleep(1); // Prevent 100% CPU; requires timeBeginPeriod(1) for ~1ms resolution
+}
+
+static HWND g_game_hwnd = nullptr;
+
+void TrackWindow(const wchar_t *window_class, const wchar_t *window_title,
+                 bool menu_open) {
+  HWND target = nullptr;
+  if (window_class)
+    target = FindWindowW(window_class, nullptr);
+  if (!target && window_title)
+    target = FindWindowW(nullptr, window_title);
+  if (!target && window_class)
+    target = FindWindowW(nullptr, window_class);
+  if (!target)
+    return;
+
+  g_game_hwnd = target;
+
+  RECT rc;
+  if (GetClientRect(target, &rc)) {
+    POINT pt = {0, 0};
+    ClientToScreen(target, &pt);
+
+    int w = rc.right - rc.left;
+    int h = rc.bottom - rc.top;
+
+    HWND foreground = GetForegroundWindow();
+    bool is_active = (foreground == target || foreground == g_hwnd);
+
+    // When menu is open, always stay on top so we don't fight with
+    // SetClickThrough and lose input mid-interaction.
+    HWND insert_after;
+    if (menu_open) {
+      insert_after = HWND_TOPMOST;
+    } else {
+      insert_after = is_active ? HWND_TOPMOST : HWND_BOTTOM;
+    }
+
+    float fw = static_cast<float>(w);
+    float fh = static_cast<float>(h);
+    float fx = static_cast<float>(pt.x);
+    float fy = static_cast<float>(pt.y);
+
+    static bool g_was_active = false;
+
+    if (g_target_x != fx || g_target_y != fy || g_width != fw ||
+        g_height != fh || g_was_active != is_active) {
+      SetWindowPos(g_hwnd, insert_after, pt.x, pt.y, w, h, SWP_NOACTIVATE);
+      g_target_x = fx;
+      g_target_y = fy;
+      g_width = fw;
+      g_height = fh;
+      g_was_active = is_active;
+    }
+  }
+}
+
+HWND GetGameHwnd() { return g_game_hwnd; }
+
+HWND GetHwnd() { return g_hwnd; }
+ID3D11Device *GetDevice() { return g_device; }
+ID3D11DeviceContext *GetContext() { return g_context; }
+float GetWidth() { return g_width; }
+float GetHeight() { return g_height; }
+float GetX() { return g_target_x; }
+float GetY() { return g_target_y; }
+bool IsVisible() { return true; }
+
+bool IsGameActive() {
+  HWND foreground = GetForegroundWindow();
+  return (foreground == g_hwnd || foreground == g_game_hwnd);
+}
+
+void SetClickThrough(bool click_through) {
+  if (!g_hwnd || g_click_through == click_through)
+    return;
+
+  LONG ex_style = GetWindowLongW(g_hwnd, GWL_EXSTYLE);
+  if (click_through) {
+    ex_style |= WS_EX_TRANSPARENT;
+  } else {
+    ex_style &= ~WS_EX_TRANSPARENT;
+  }
+  SetWindowLongW(g_hwnd, GWL_EXSTYLE, ex_style);
+  SetWindowPos(g_hwnd, nullptr, 0, 0, 0, 0,
+               SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE |
+                   SWP_FRAMECHANGED);
+  g_click_through = click_through;
+}
+
+} // namespace nova::overlay
+'''
+
+_TPL_ADMIN_ESP_CPP = r'''#include "esp.hpp"
+#include <cstdio>
+
+namespace nova::esp {
+
+void DrawBox(const Vec2& tl, const Vec2& br, ImU32 color, BoxStyle style, float thickness) {
+    auto* dl = ImGui::GetBackgroundDrawList();
+    float w = br.x - tl.x;
+    float h = br.y - tl.y;
+
+    switch (style) {
+    case BoxStyle::Full:
+        dl->AddRect(ImVec2(tl.x, tl.y), ImVec2(br.x, br.y), color, 0.0f, 0, thickness);
+        break;
+    case BoxStyle::Rounded:
+        dl->AddRect(ImVec2(tl.x, tl.y), ImVec2(br.x, br.y), color, 4.0f, 0, thickness);
+        break;
+    case BoxStyle::Corner: {
+        float corner = w * 0.2f;
+        if (corner < 6.0f) corner = 6.0f;
+        // Top-left
+        dl->AddLine(ImVec2(tl.x, tl.y), ImVec2(tl.x + corner, tl.y), color, thickness);
+        dl->AddLine(ImVec2(tl.x, tl.y), ImVec2(tl.x, tl.y + corner), color, thickness);
+        // Top-right
+        dl->AddLine(ImVec2(br.x, tl.y), ImVec2(br.x - corner, tl.y), color, thickness);
+        dl->AddLine(ImVec2(br.x, tl.y), ImVec2(br.x, tl.y + corner), color, thickness);
+        // Bottom-left
+        dl->AddLine(ImVec2(tl.x, br.y), ImVec2(tl.x + corner, br.y), color, thickness);
+        dl->AddLine(ImVec2(tl.x, br.y), ImVec2(tl.x, br.y - corner), color, thickness);
+        // Bottom-right
+        dl->AddLine(ImVec2(br.x, br.y), ImVec2(br.x - corner, br.y), color, thickness);
+        dl->AddLine(ImVec2(br.x, br.y), ImVec2(br.x, br.y - corner), color, thickness);
+        break;
+    }
+    }
+}
+
+void RenderESP(const Config& cfg, const EntityData* entities, int count,
+               const ViewMatrix& vm, const Vec3& local_pos,
+               float screen_w, float screen_h,
+               float offset_x, float offset_y) {
+    if (!cfg.enabled) return;
+    auto* dl = ImGui::GetBackgroundDrawList();
+
+    for (int i = 0; i < count; ++i) {
+        const auto& ent = entities[i];
+        if (!ent.is_valid) continue;
+        if (ent.is_local && !cfg.show_local_player) continue;
+        if (!ent.is_local && ent.is_teammate && !cfg.show_teammates) continue;
+
+        float dist = Distance3D(local_pos, ent.position) / 100.0f;  // UE units to meters
+        if (!ent.is_local && (dist > cfg.max_distance || dist < 1.0f)) continue;
+
+        Vec2 head_screen, feet_screen;
+        // In Unreal Engine, the SceneComponent location is the center of the Capsule.
+        // Downed players usually have 0 Main Health (and switch to Dying Health).
+        // Their capsule shrinks dramatically when they are crawling on the floor.
+        float half_height = (ent.health <= 0.0f) ? 30.0f : 90.0f;
+
+        Vec3 feet_pos = ent.position;
+        feet_pos.z -= half_height;  // Move down to floor
+
+        Vec3 head_pos = ent.position;
+        head_pos.z += half_height;  // Move up to head/torso top
+
+        if (!WorldToScreen(feet_pos, feet_screen, vm, screen_w, screen_h)) continue;
+        if (!WorldToScreen(head_pos, head_screen, vm, screen_w, screen_h)) continue;
+
+        feet_screen.x += offset_x;
+        feet_screen.y += offset_y;
+        head_screen.x += offset_x;
+        head_screen.y += offset_y;
+
+        float box_h = feet_screen.y - head_screen.y;
+        if (box_h < 4.0f) continue;
+        float box_w = box_h * 0.45f;
+
+        Vec2 tl = { head_screen.x - box_w * 0.5f, head_screen.y };
+        Vec2 br = { head_screen.x + box_w * 0.5f, feet_screen.y };
+
+        ImVec4 base_color = cfg.box_color;
+        if (cfg.use_team_colors && !ent.is_local) {
+            base_color = ent.is_teammate ? cfg.teammate_color : cfg.enemy_color;
+        }
+        ImU32 box_col = ImGui::ColorConvertFloat4ToU32(base_color);
+
+        // Box ESP
+        if (cfg.box_esp)
+            DrawBox(tl, br, box_col, cfg.box_style);
+
+        // Name ESP
+        if (cfg.name_esp) {
+            ImVec2 text_size = ImGui::CalcTextSize(ent.name);
+            dl->AddText(ImVec2(head_screen.x - text_size.x * 0.5f, tl.y - text_size.y - 2.0f),
+                        ImGui::ColorConvertFloat4ToU32(cfg.name_color), ent.name);
+        }
+
+        // Health bar ESP
+        if (cfg.health_esp && ent.max_health > 0.0f) {
+            float hp_frac = ent.health / ent.max_health;
+            if (hp_frac < 0.0f) hp_frac = 0.0f;
+            if (hp_frac > 1.0f) hp_frac = 1.0f;
+
+            float bar_w = 3.0f;
+            float bar_x = tl.x - bar_w - 3.0f;
+            float bar_top = tl.y;
+            float bar_bot = br.y;
+            float bar_fill = bar_top + (bar_bot - bar_top) * (1.0f - hp_frac);
+
+            // Background
+            dl->AddRectFilled(ImVec2(bar_x, bar_top), ImVec2(bar_x + bar_w, bar_bot),
+                              IM_COL32(0, 0, 0, 180));
+            // Health fill (green → red gradient)
+            ImU32 hp_color = IM_COL32(
+                static_cast<int>((1.0f - hp_frac) * 255),
+                static_cast<int>(hp_frac * 255), 0, 255);
+            dl->AddRectFilled(ImVec2(bar_x, bar_fill), ImVec2(bar_x + bar_w, bar_bot), hp_color);
+        }
+
+        // Guard bar ESP
+        if (cfg.guard_esp && ent.max_guard > 0.0f) {
+            float gp_frac = ent.guard / ent.max_guard;
+            if (gp_frac < 0.0f) gp_frac = 0.0f;
+            if (gp_frac > 1.0f) gp_frac = 1.0f;
+
+            float bar_w = 3.0f;
+            float bar_x = br.x + 3.0f;
+            float bar_top = tl.y;
+            float bar_bot = br.y;
+            float bar_fill = bar_top + (bar_bot - bar_top) * (1.0f - gp_frac);
+
+            dl->AddRectFilled(ImVec2(bar_x, bar_top), ImVec2(bar_x + bar_w, bar_bot),
+                              IM_COL32(0, 0, 0, 180));
+            dl->AddRectFilled(ImVec2(bar_x, bar_fill), ImVec2(bar_x + bar_w, bar_bot),
+                              IM_COL32(70, 170, 255, 230));
+        }
+
+        // Distance ESP
+        if (cfg.distance_esp) {
+            char dist_buf[16];
+            std::snprintf(dist_buf, sizeof(dist_buf), "%.0fm", dist);
+            ImVec2 dist_size = ImGui::CalcTextSize(dist_buf);
+            dl->AddText(ImVec2(head_screen.x - dist_size.x * 0.5f, br.y + 2.0f),
+                        IM_COL32(200, 200, 200, 220), dist_buf);
+        }
+
+        if (cfg.plus_ultra_esp) {
+            char pu_buf[32];
+            std::snprintf(pu_buf, sizeof(pu_buf), "PU %.0f", ent.plus_ultra);
+            ImVec2 pu_size = ImGui::CalcTextSize(pu_buf);
+            float y = br.y + (cfg.distance_esp ? 16.0f : 2.0f);
+            ImU32 pu_col = ent.plus_ultra >= 100.0f ? IM_COL32(255, 215, 90, 230)
+                                                    : IM_COL32(170, 170, 210, 220);
+            dl->AddText(ImVec2(head_screen.x - pu_size.x * 0.5f, y), pu_col, pu_buf);
+        }
+    }
+}
+
+}  // namespace nova::esp
+'''
+
+_TPL_ADMIN_MENU_CPP = r'''#include "menu.hpp"
+#include "generated_feature_catalog.hpp"
+#include "imgui.h"
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
+#include <string>
+#include <windows.h>
+
+namespace nova::menu {
+
+struct KeybindOption {
+  const char *label;
+  int vk;
+};
+
+static constexpr KeybindOption kAimbotKeyOptions[] = {
+    {"Right Mouse", VK_RBUTTON},
+    {"Left Mouse", VK_LBUTTON},
+    {"Mouse 4", VK_XBUTTON1},
+    {"Mouse 5", VK_XBUTTON2},
+    {"Left Shift", VK_LSHIFT},
+    {"Left Alt", VK_LMENU},
+    {"Q", 'Q'},
+    {"E", 'E'},
+    {"F", 'F'},
+    {"X", 'X'},
+    {"C", 'C'},
+};
+
+static int FindAimbotKeyIndex(int vk) {
+  for (int i = 0; i < static_cast<int>(sizeof(kAimbotKeyOptions) /
+                                       sizeof(kAimbotKeyOptions[0]));
+       ++i) {
+    if (kAimbotKeyOptions[i].vk == vk)
+      return i;
+  }
+  return 0;
+}
+
+static void ApplyPremiumTheme() {
+  ImGuiStyle &s = ImGui::GetStyle();
+  s.WindowRounding = 12.0f;
+  s.ChildRounding = 10.0f;
+  s.FrameRounding = 8.0f;
+  s.PopupRounding = 8.0f;
+  s.ScrollbarRounding = 8.0f;
+  s.GrabRounding = 8.0f;
+  s.TabRounding = 8.0f;
+  s.WindowPadding = ImVec2(20.0f, 20.0f);
+  s.FramePadding = ImVec2(14.0f, 10.0f);
+  s.ItemSpacing = ImVec2(12.0f, 12.0f);
+  s.ItemInnerSpacing = ImVec2(10.0f, 8.0f);
+  s.WindowBorderSize = 1.0f;
+  s.FrameBorderSize = 1.0f;
+  s.PopupBorderSize = 1.0f;
+
+  auto &c = s.Colors;
+  c[ImGuiCol_WindowBg] = ImVec4(0.06f, 0.06f, 0.09f, 0.96f);
+  c[ImGuiCol_ChildBg] = ImVec4(0.09f, 0.09f, 0.12f, 0.70f);
+  c[ImGuiCol_PopupBg] = ImVec4(0.08f, 0.08f, 0.11f, 0.98f);
+  c[ImGuiCol_Border] = ImVec4(0.20f, 0.20f, 0.25f, 0.80f);
+  c[ImGuiCol_BorderShadow] = ImVec4(0.00f, 0.00f, 0.00f, 0.40f);
+  c[ImGuiCol_FrameBg] = ImVec4(0.12f, 0.12f, 0.17f, 0.80f);
+  c[ImGuiCol_FrameBgHovered] = ImVec4(0.20f, 0.20f, 0.28f, 0.90f);
+  c[ImGuiCol_FrameBgActive] = ImVec4(0.28f, 0.25f, 0.45f, 0.90f);
+
+  // Vibrant Neon Violet Accents
+  ImVec4 accent_base = ImVec4(0.50f, 0.20f, 0.95f, 1.0f);
+  ImVec4 accent_hov = ImVec4(0.60f, 0.30f, 1.00f, 1.0f);
+  ImVec4 accent_act = ImVec4(0.70f, 0.45f, 1.00f, 1.0f);
+
+  c[ImGuiCol_TitleBg] = ImVec4(0.06f, 0.06f, 0.09f, 1.0f);
+  c[ImGuiCol_TitleBgActive] = ImVec4(0.08f, 0.08f, 0.11f, 1.0f);
+  c[ImGuiCol_TitleBgCollapsed] = ImVec4(0.06f, 0.06f, 0.09f, 0.51f);
+
+  c[ImGuiCol_MenuBarBg] = ImVec4(0.09f, 0.09f, 0.12f, 1.0f);
+
+  c[ImGuiCol_Tab] = ImVec4(0.12f, 0.12f, 0.16f, 1.0f);
+  c[ImGuiCol_TabHovered] = accent_hov;
+  c[ImGuiCol_TabActive] = accent_base;
+  c[ImGuiCol_TabUnfocused] = ImVec4(0.12f, 0.12f, 0.16f, 1.0f);
+  c[ImGuiCol_TabUnfocusedActive] = ImVec4(0.25f, 0.15f, 0.40f, 1.0f);
+
+  c[ImGuiCol_Button] = ImVec4(0.16f, 0.16f, 0.22f, 1.0f);
+  c[ImGuiCol_ButtonHovered] = accent_hov;
+  c[ImGuiCol_ButtonActive] = accent_act;
+
+  c[ImGuiCol_Header] = ImVec4(0.18f, 0.18f, 0.24f, 1.0f);
+  c[ImGuiCol_HeaderHovered] = accent_hov;
+  c[ImGuiCol_HeaderActive] = accent_act;
+
+  c[ImGuiCol_Separator] = ImVec4(0.22f, 0.22f, 0.28f, 0.80f);
+  c[ImGuiCol_SeparatorHovered] = accent_hov;
+  c[ImGuiCol_SeparatorActive] = accent_act;
+
+  c[ImGuiCol_CheckMark] = ImVec4(0.95f, 0.95f, 0.98f, 1.0f);
+  c[ImGuiCol_SliderGrab] = accent_base;
+  c[ImGuiCol_SliderGrabActive] = accent_act;
+
+  c[ImGuiCol_Text] = ImVec4(0.95f, 0.95f, 0.98f, 1.0f);
+  c[ImGuiCol_TextDisabled] = ImVec4(0.60f, 0.60f, 0.65f, 1.0f);
+}
+
+void Render(MenuState &state, bool driver_connected, unsigned long target_pid,
+            unsigned long long module_base) {
+  ApplyPremiumTheme();
+
+  // Watermark
+  if (state.show_watermark) {
+    auto *dl = ImGui::GetBackgroundDrawList();
+    dl->AddText(ImVec2(10, 10), IM_COL32(200, 150, 250, 180),
+                "NOVA Core Template");
+  }
+
+  if (!state.visible)
+    return;
+
+  ImGui::SetNextWindowSize(ImVec2(520, 440), ImGuiCond_FirstUseEver);
+  ImGui::Begin("NOVA", &state.visible, ImGuiWindowFlags_NoCollapse);
+
+  if (ImGui::BeginTabBar("MainTabs")) {
+    // ── Visuals Tab ──────────────────────────────────
+    if (ImGui::BeginTabItem("Visuals")) {
+      auto &cfg = state.esp_config;
+      ImGui::Checkbox("ESP Enabled", &cfg.enabled);
+      ImGui::Separator();
+
+      if (cfg.enabled) {
+        ImGui::Checkbox("Box ESP", &cfg.box_esp);
+        if (cfg.box_esp) {
+          ImGui::SameLine(200);
+          const char *styles[] = {"Full", "Corner", "Rounded"};
+          int style_idx = static_cast<int>(cfg.box_style);
+          if (ImGui::Combo("Style", &style_idx, styles, 3))
+            cfg.box_style = static_cast<nova::esp::BoxStyle>(style_idx);
+          ImGui::ColorEdit4("Box Color", &cfg.box_color.x,
+                            ImGuiColorEditFlags_NoInputs |
+                                ImGuiColorEditFlags_AlphaBar);
+        }
+        ImGui::Checkbox("Name ESP", &cfg.name_esp);
+        if (cfg.name_esp) {
+          ImGui::SameLine(200);
+          ImGui::ColorEdit4("Name Color", &cfg.name_color.x,
+                            ImGuiColorEditFlags_NoInputs);
+        }
+        ImGui::Checkbox("Health Bar", &cfg.health_esp);
+        ImGui::Checkbox("Armor Bar", &cfg.guard_esp);
+        ImGui::Checkbox("Distance", &cfg.distance_esp);
+        ImGui::Checkbox("Resource Bar", &cfg.plus_ultra_esp);
+        ImGui::Checkbox("Show Teammates", &cfg.show_teammates);
+        ImGui::Checkbox("Show Local Player", &cfg.show_local_player);
+        ImGui::Checkbox("Team Colors", &cfg.use_team_colors);
+        if (cfg.use_team_colors) {
+          ImGui::ColorEdit4("Enemy Color", &cfg.enemy_color.x,
+                            ImGuiColorEditFlags_NoInputs |
+                                ImGuiColorEditFlags_AlphaBar);
+          ImGui::ColorEdit4("Teammate Color", &cfg.teammate_color.x,
+                            ImGuiColorEditFlags_NoInputs |
+                                ImGuiColorEditFlags_AlphaBar);
+        }
+        ImGui::SliderFloat("Max Distance (m)", &cfg.max_distance, 50.0f,
+                           2000.0f, "%.0f");
+        ImGui::Separator();
+        ImGui::Checkbox("Glow Outline", &cfg.glow_outline);
+        if (cfg.glow_outline) {
+          ImGui::TextDisabled("Glow requires game-specific struct writes.");
+          ImGui::TextDisabled("Wire this in esp.cpp -> apply glow to entity.");
+        }
+      }
+      ImGui::EndTabItem();
+    }
+
+    // ── Combat Tab ───────────────────────────────────
+    if (ImGui::BeginTabItem("Combat")) {
+      ImGui::Checkbox("Aimbot", &state.aimbot_enabled);
+      if (state.aimbot_enabled) {
+        ImGui::SliderFloat("FOV", &state.aimbot_fov, 1.0f, 30.0f, "%.1f deg");
+        ImGui::SliderFloat("Smoothing", &state.aimbot_smooth, 1.0f, 20.0f,
+                           "%.1f");
+        const char *activation_modes[] = {"Hold", "Toggle"};
+        int mode_idx = static_cast<int>(state.aimbot_activation_mode);
+        if (ImGui::Combo("Activation Mode", &mode_idx, activation_modes, 2)) {
+          state.aimbot_activation_mode =
+              static_cast<AimbotActivationMode>(mode_idx);
+          state.aimbot_toggled_on = false;
+          state.aimbot_active = false;
+        }
+
+        int key_idx = FindAimbotKeyIndex(state.aimbot_key);
+        if (ImGui::BeginCombo("Aimbot Key", kAimbotKeyOptions[key_idx].label)) {
+          for (int i = 0; i < static_cast<int>(sizeof(kAimbotKeyOptions) /
+                                               sizeof(kAimbotKeyOptions[0]));
+               ++i) {
+            const bool selected = (i == key_idx);
+            if (ImGui::Selectable(kAimbotKeyOptions[i].label, selected)) {
+              state.aimbot_key = kAimbotKeyOptions[i].vk;
+              state.aimbot_toggled_on = false;
+              state.aimbot_active = false;
+              state.aimbot_was_down = false;
+            }
+            if (selected)
+              ImGui::SetItemDefaultFocus();
+          }
+          ImGui::EndCombo();
+        }
+
+        ImGui::TextDisabled("Status: %s",
+                            state.aimbot_active ? "ACTIVE" : "IDLE");
+        ImGui::TextDisabled("Lower smooth = snappier. 1.0 = instant.");
+      }
+      ImGui::EndTabItem();
+    }
+
+    // ── Misc Tab ─────────────────────────────────────
+    if (ImGui::BeginTabItem("Misc")) {
+      ImGui::Text("Driver: %s", driver_connected ? "Connected" : "Not loaded");
+      if (target_pid)
+        ImGui::Text("PID: %lu  |  Base: 0x%llX", target_pid, module_base);
+      else
+        ImGui::TextDisabled("Not attached to any process.");
+      ImGui::Separator();
+      ImGui::Checkbox("Show FPS", &state.show_fps);
+      ImGui::Checkbox("Show Watermark", &state.show_watermark);
+      ImGui::Checkbox("Show Debug Panel", &state.show_debug_panel);
+      if (state.show_fps)
+        ImGui::Text("FPS: %.0f", ImGui::GetIO().Framerate);
+      ImGui::Separator();
+      ImGui::TextDisabled("Hotkeys: F3/INSERT toggle menu, HOME unloads NOVA");
+      ImGui::TextDisabled("Debug panel is draggable while menu is open.");
+      ImGui::TextDisabled("Game: %s", nova::template_data::kGameName);
+      ImGui::TextDisabled("Engine: %s %s", nova::template_data::kEngine,
+                          nova::template_data::kVersion);
+      ImGui::EndTabItem();
+    }
+
+    // ── Config Tab ───────────────────────────────────
+    if (ImGui::BeginTabItem("Config")) {
+      ImGui::InputText("Config File", state.config_path,
+                       sizeof(state.config_path));
+      if (ImGui::Button("Save Config"))
+        SaveConfig(state, state.config_path);
+      ImGui::SameLine();
+      if (ImGui::Button("Load Config"))
+        LoadConfig(state, state.config_path);
+      ImGui::Separator();
+      ImGui::TextDisabled("Configs are saved as JSON for easy editing.");
+      ImGui::EndTabItem();
+    }
+
+    ImGui::EndTabBar();
+  }
+  ImGui::End();
+}
+
+void Toggle(MenuState &state) { state.visible = !state.visible; }
+
+void SaveConfig(const MenuState &state, const char *path) {
+  // Minimal JSON config save
+  std::ofstream f(path);
+  if (!f.is_open())
+    return;
+  const auto &c = state.esp_config;
+  f << "{\n";
+  f << "  \"esp_enabled\": " << (c.enabled ? "true" : "false") << ",\n";
+  f << "  \"box_esp\": " << (c.box_esp ? "true" : "false") << ",\n";
+  f << "  \"name_esp\": " << (c.name_esp ? "true" : "false") << ",\n";
+  f << "  \"health_esp\": " << (c.health_esp ? "true" : "false") << ",\n";
+  f << "  \"guard_esp\": " << (c.guard_esp ? "true" : "false") << ",\n";
+  f << "  \"distance_esp\": " << (c.distance_esp ? "true" : "false") << ",\n";
+  f << "  \"plus_ultra_esp\": " << (c.plus_ultra_esp ? "true" : "false")
+    << ",\n";
+  f << "  \"show_teammates\": " << (c.show_teammates ? "true" : "false")
+    << ",\n";
+  f << "  \"show_local_player\": " << (c.show_local_player ? "true" : "false")
+    << ",\n";
+  f << "  \"use_team_colors\": " << (c.use_team_colors ? "true" : "false")
+    << ",\n";
+  f << "  \"glow_outline\": " << (c.glow_outline ? "true" : "false") << ",\n";
+  f << "  \"show_debug_panel\": " << (state.show_debug_panel ? "true" : "false")
+    << ",\n";
+  f << "  \"box_style\": " << static_cast<int>(c.box_style) << ",\n";
+  f << "  \"max_distance\": " << c.max_distance << ",\n";
+  f << "  \"aimbot_enabled\": " << (state.aimbot_enabled ? "true" : "false")
+    << ",\n";
+  f << "  \"aimbot_fov\": " << state.aimbot_fov << ",\n";
+  f << "  \"aimbot_smooth\": " << state.aimbot_smooth << ",\n";
+  f << "  \"aimbot_activation_mode\": "
+    << static_cast<int>(state.aimbot_activation_mode) << ",\n";
+  f << "  \"aimbot_key\": " << state.aimbot_key << "\n";
+  f << "}\n";
+}
+
+void LoadConfig(MenuState &state, const char *path) {
+  std::ifstream f(path);
+  if (!f.is_open())
+    return;
+
+  std::string src((std::istreambuf_iterator<char>(f)),
+                  std::istreambuf_iterator<char>());
+  auto &c = state.esp_config;
+
+  auto parse_bool = [&](const char *key, bool &out) {
+    std::string token = std::string("\"") + key + "\"";
+    size_t p = src.find(token);
+    if (p == std::string::npos)
+      return;
+    p = src.find(':', p);
+    if (p == std::string::npos)
+      return;
+    p = src.find_first_not_of(" \t\r\n", p + 1);
+    if (p == std::string::npos)
+      return;
+    if (src.compare(p, 4, "true") == 0)
+      out = true;
+    if (src.compare(p, 5, "false") == 0)
+      out = false;
+  };
+
+  auto parse_int = [&](const char *key, int &out) {
+    std::string token = std::string("\"") + key + "\"";
+    size_t p = src.find(token);
+    if (p == std::string::npos)
+      return;
+    p = src.find(':', p);
+    if (p == std::string::npos)
+      return;
+    p = src.find_first_of("-0123456789", p + 1);
+    if (p == std::string::npos)
+      return;
+    out = std::atoi(src.c_str() + p);
+  };
+
+  auto parse_float = [&](const char *key, float &out) {
+    std::string token = std::string("\"") + key + "\"";
+    size_t p = src.find(token);
+    if (p == std::string::npos)
+      return;
+    p = src.find(':', p);
+    if (p == std::string::npos)
+      return;
+    p = src.find_first_of("-0123456789.", p + 1);
+    if (p == std::string::npos)
+      return;
+    out = std::strtof(src.c_str() + p, nullptr);
+  };
+
+  parse_bool("esp_enabled", c.enabled);
+  parse_bool("box_esp", c.box_esp);
+  parse_bool("name_esp", c.name_esp);
+  parse_bool("health_esp", c.health_esp);
+  parse_bool("guard_esp", c.guard_esp);
+  parse_bool("distance_esp", c.distance_esp);
+  parse_bool("plus_ultra_esp", c.plus_ultra_esp);
+  parse_bool("show_teammates", c.show_teammates);
+  parse_bool("show_local_player", c.show_local_player);
+  parse_bool("use_team_colors", c.use_team_colors);
+  parse_bool("glow_outline", c.glow_outline);
+  parse_bool("show_debug_panel", state.show_debug_panel);
+  parse_float("max_distance", c.max_distance);
+  parse_bool("aimbot_enabled", state.aimbot_enabled);
+  parse_float("aimbot_fov", state.aimbot_fov);
+  parse_float("aimbot_smooth", state.aimbot_smooth);
+  int activation_mode = static_cast<int>(state.aimbot_activation_mode);
+  parse_int("aimbot_activation_mode", activation_mode);
+  if (activation_mode < 0 || activation_mode > 1)
+    activation_mode = 0;
+  state.aimbot_activation_mode =
+      static_cast<AimbotActivationMode>(activation_mode);
+  parse_int("aimbot_key", state.aimbot_key);
+  state.aimbot_key = kAimbotKeyOptions[FindAimbotKeyIndex(state.aimbot_key)].vk;
+  state.aimbot_active = false;
+  state.aimbot_toggled_on = false;
+  state.aimbot_was_down = false;
+
+  int style_idx = static_cast<int>(c.box_style);
+  parse_int("box_style", style_idx);
+  if (style_idx < 0 || style_idx > 2)
+    style_idx = 1;
+  c.box_style = static_cast<nova::esp::BoxStyle>(style_idx);
+}
+
+} // namespace nova::menu
+'''
+
 def _render_admin_readme(
     game_name: str,
     meta: Dict[str, str],
