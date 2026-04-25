@@ -12,7 +12,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
 
-from src.core.memory import get_module_info
+from src.core.memory import get_module_info, read_bytes
 from src.core.scanner import resolve_rip, scan_pattern
 from src.engines.source2.prediction_signatures import (
     ALL_PREDICTION_SIGS,
@@ -21,6 +21,21 @@ from src.engines.source2.prediction_signatures import (
 )
 
 logger = logging.getLogger(__name__)
+
+def _find_previous_rip_load(handle: int, start_addr: int, max_back: int = 96) -> int:
+    """Scan backwards from an address looking for '48 8B 0D' and resolve the RIP."""
+    if not start_addr:
+        return 0
+    search_start = start_addr - max_back
+    chunk = read_bytes(handle, search_start, max_back + 3)
+    if not chunk or len(chunk) < 3:
+        return 0
+        
+    for i in range(len(chunk) - 3, -1, -1):
+        if chunk[i] == 0x48 and chunk[i+1] == 0x8B and chunk[i+2] == 0x0D:
+            match_addr = search_start + i
+            return resolve_rip(handle, match_addr, 3, 7)
+    return 0
 
 
 @dataclass
@@ -158,6 +173,19 @@ def find_prediction_signatures(
             continue
 
         result = _scan_one_sig(handle, entry, mod_base, mod_size)
+
+        # Backward scan fallback for fnCommandBase
+        if entry.name == "fnCommandBase" and not result.found:
+            entry_sig = next((r for r in results if r.name == "fnGetUserCmdEntry"), None)
+            if entry_sig and entry_sig.found:
+                found_addr = _find_previous_rip_load(handle, entry_sig.absolute)
+                if found_addr:
+                    result.found = True
+                    result.error = ""
+                    result.absolute = found_addr
+                    result.rva = found_addr - mod_base
+                    result.description += " (found via backward scan from fnGetUserCmdEntry)"
+
         results.append(result)
 
         if result.found:
