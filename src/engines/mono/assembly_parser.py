@@ -99,18 +99,14 @@ def _parse_with_dnfile(path: str) -> List[TypeInfo]:
         if not _logged_fieldlist_type:
             _logged_fieldlist_type = True
             try:
-                import os as _fos
-                _diag = _fos.path.join(_fos.path.dirname(_fos.path.abspath(__file__)), "..", "..", "..", "mono_debug.log")
-                with open(_diag, "a") as _df:
-                    _df.write(f"FieldList type: {type(field_list_obj).__name__}\n")
-                    _df.write(f"  is_list={isinstance(field_list_obj, list)}\n")
-                    _df.write(f"  has_iter={hasattr(field_list_obj, '__iter__')}\n")
-                    _df.write(f"  has_row_index={hasattr(field_list_obj, 'row_index')}\n")
-                    _df.write(f"  has_value={hasattr(field_list_obj, 'value')}\n")
-                    _df.write(f"  has_table={hasattr(field_list_obj, 'table')}\n")
-                    _df.write(f"  repr={repr(field_list_obj)[:300]}\n")
-                    _df.write(f"  dir={[a for a in dir(field_list_obj) if not a.startswith('_')]}\n")
-                    _df.write(f"  fd_rows count={len(fd_rows)}\n\n")
+                log(f"  FieldList type: {type(field_list_obj).__name__}")
+                log(f"    is_list={isinstance(field_list_obj, list)}")
+                log(f"    has_iter={hasattr(field_list_obj, '__iter__')}")
+                log(f"    has_row_index={hasattr(field_list_obj, 'row_index')}")
+                log(f"    has_value={hasattr(field_list_obj, 'value')}")
+                log(f"    has_table={hasattr(field_list_obj, 'table')}")
+                log(f"    repr={repr(field_list_obj)[:200]}")
+                log(f"    dir={[a for a in dir(field_list_obj) if not a.startswith('_')]}")
             except Exception:
                 pass
         if isinstance(field_list_obj, list) or (hasattr(field_list_obj, "__iter__") and not hasattr(field_list_obj, "row_index") and not isinstance(field_list_obj, str) and not hasattr(field_list_obj, "value") and not hasattr(field_list_obj, "table")):

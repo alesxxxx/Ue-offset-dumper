@@ -60,7 +60,8 @@ class MonoExecutor:
                 return self._class_map[key]
         return 0
 
-    def walk_types(self, progress_callback=None) -> SDKDump:
+    def walk_types(self, progress_callback=None, log=None) -> SDKDump:
+        if log is None: log = print
         dump = SDKDump()
         dump.object_count = len(self.types)
         total = len(self.types)
@@ -69,24 +70,9 @@ class MonoExecutor:
         # Diagnostic: count types with/without fields
         with_fields = sum(1 for t in self.types if t.fields)
         with_enum_vals = sum(1 for t in self.types if t.is_enum and (t.enum_values or t.fields))
-        print(f"[DEBUG] Mono executor: {total} types, {with_fields} have fields, {with_enum_vals} are enums with values")
+        log(f"  Total {total} types, {with_fields} have fields, {with_enum_vals} are enums with values")
         for t in self.types[:5]:
-            print(f"[DEBUG]   {t.full_name}: fields={len(t.fields)}, is_enum={t.is_enum}, enum_vals={len(t.enum_values)}")
-
-        # Write diagnostic to file for GUI-invisible debugging
-        try:
-            import os
-            diag_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "mono_debug.log")
-            with open(diag_path, "w") as df:
-                df.write(f"Total types: {total}\n")
-                df.write(f"Types with fields: {with_fields}\n")
-                df.write(f"Enums with values: {with_enum_vals}\n\n")
-                for t in self.types[:20]:
-                    df.write(f"{t.full_name}: fields={len(t.fields)}, methods={len(t.methods)}, is_enum={t.is_enum}, parent={t.parent_name}\n")
-                    for f in t.fields[:5]:
-                        df.write(f"  field: {f.name} ({f.type_name})\n")
-        except Exception:
-            pass
+            log(f"  > {t.full_name}: fields={len(t.fields)}, is_enum={t.is_enum}")
 
         for i, ti in enumerate(self.types):
             if progress_callback and i % 200 == 0:
@@ -106,8 +92,8 @@ class MonoExecutor:
         if progress_callback:
             progress_callback(total, total)
 
-        print(
-            f"[DEBUG] Mono: walk complete — "
+        log(
+            f"  [OK] walk complete — "
             f"{structs_found} structs/classes, {enums_found} enums"
         )
         return dump
