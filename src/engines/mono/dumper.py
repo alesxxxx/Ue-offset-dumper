@@ -17,6 +17,25 @@ def find_managed_dir(
 
     game_dir = process_name.replace(".exe", "")
 
+    try:
+        from src.engines.ue.detector import _find_exe_from_process
+        exe_path = _find_exe_from_process(process_name)
+        if exe_path:
+            exe_dir = os.path.dirname(exe_path)
+            data_dir_name = os.path.basename(exe_path).replace(".exe", "") + "_Data"
+            candidate = os.path.join(exe_dir, data_dir_name, "Managed")
+            if os.path.isdir(candidate):
+                return os.path.abspath(candidate)
+
+            if os.path.isdir(exe_dir):
+                for item in os.listdir(exe_dir):
+                    if item.endswith("_Data"):
+                        candidate = os.path.join(exe_dir, item, "Managed")
+                        if os.path.isdir(candidate):
+                            return os.path.abspath(candidate)
+    except Exception:
+        pass
+
     candidate = os.path.join("games", game_dir, "Managed")
     if os.path.isdir(candidate):
         return os.path.abspath(candidate)
