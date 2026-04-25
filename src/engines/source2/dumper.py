@@ -7,6 +7,17 @@ from src.engines.source2.parser import get_type_scope_classes
 
 logger = logging.getLogger(__name__)
 
+_MAX_SCHEMA_CLASS_NAME_LEN = 128
+_MAX_SCHEMA_TYPE_NAME_LEN = 256
+_MAX_REASONABLE_CLASS_SIZE = 1024 * 1024
+_MAX_REASONABLE_CLASS_FIELDS = 512
+
+
+def _is_reasonable_schema_text(value: str, *, max_len: int) -> bool:
+    if not value or len(value) > max_len:
+        return False
+    return all(0x20 <= ord(ch) <= 0x7E for ch in value)
+
 def dump_source2(
     handle: int,
     process_name: str,
@@ -79,6 +90,8 @@ def dump_source2(
 
     structs = []
     total_props = 0
+    skipped_invalid_classes = 0
+    skipped_invalid_fields = 0
 
     for i in range(scopes_size):
         # Array of pointers to CSchemaSystemTypeScope
@@ -102,7 +115,23 @@ def dump_source2(
         for class_ptr in classes_ptrs:
             # Parse SchemaClassInfoData
             class_name_ptr = read_uint64(handle, class_ptr + 0x8)
-            class_name = read_string(handle, class_name_ptr)
+            class_name = read_string(handle, class_name_ptr, max_len=_MAX_SCHEMA_CLASS_NAME_LEN)
+            size = read_uint32(handle, class_ptr + 0x20)
+            fields_count = read_uint16(handle, class_ptr + 0x24)
+            fields_ptr = read_uint64(handle, class_ptr + 0x30)
+
+            if not _is_reasonable_schema_text(class_name, max_len=_MAX_SCHEMA_CLASS_NAME_LEN):
+                skipped_invalid_classes += 1
+                continue
+            if size > _MAX_REASONABLE_CLASS_SIZE:
+                skipped_invalid_classes += 1
+                continue
+            if fields_count > _MAX_REASONABLE_CLASS_FIELDS:
+                skipped_invalid_classes += 1
+                continue
+            if fields_count and not fields_ptr:
+                skipped_invalid_classes += 1
+                continue
             
             # base class
             base_class_ptr = read_uint64(handle, class_ptr + 0x40)
@@ -111,10 +140,9 @@ def dump_source2(
                 b_info = read_uint64(handle, base_class_ptr + 0x8) # ptr to SchemaClassInfoData
                 if b_info:
                     b_name_ptr = read_uint64(handle, b_info + 0x8)
-                    base_class_name = read_string(handle, b_name_ptr)
-
-            fields_count = read_uint16(handle, class_ptr + 0x24)
-            fields_ptr = read_uint64(handle, class_ptr + 0x30)
+                    candidate = read_string(handle, b_name_ptr, max_len=_MAX_SCHEMA_CLASS_NAME_LEN)
+                    if _is_reasonable_schema_text(candidate, max_len=_MAX_SCHEMA_CLASS_NAME_LEN):
+                        base_class_name = candidate
             
             members = []
             for f in range(fields_count):
@@ -122,16 +150,24 @@ def dump_source2(
                 f_addr = fields_ptr + (f * 0x20)
                 
                 f_name_ptr = read_uint64(handle, f_addr + 0x0)
-                f_name = read_string(handle, f_name_ptr)
+                f_name = read_string(handle, f_name_ptr, max_len=_MAX_SCHEMA_CLASS_NAME_LEN)
+                if not _is_reasonable_schema_text(f_name, max_len=_MAX_SCHEMA_CLASS_NAME_LEN):
+                    skipped_invalid_fields += 1
+                    continue
                 
                 schema_type_ptr = read_uint64(handle, f_addr + 0x8)
                 type_name = "Unknown"
                 if schema_type_ptr:
                     # SchemaType_t : name is at +0x8
                     t_name_ptr = read_uint64(handle, schema_type_ptr + 0x8)
-                    type_name = read_string(handle, t_name_ptr)
+                    candidate = read_string(handle, t_name_ptr, max_len=_MAX_SCHEMA_TYPE_NAME_LEN)
+                    if _is_reasonable_schema_text(candidate, max_len=_MAX_SCHEMA_TYPE_NAME_LEN):
+                        type_name = candidate
                     
                 offset = read_uint32(handle, f_addr + 0x10)
+                if size and offset > size + 0x1000:
+                    skipped_invalid_fields += 1
+                    continue
                 
                 members.append(
                     MemberInfo(
@@ -151,7 +187,7 @@ def dump_source2(
                     name=class_name,
                     full_name=f"Source2.{scope_name}.{class_name}",
                     address=0,
-                    size=read_uint32(handle, class_ptr + 0x20),
+                    size=size,
                     super_name=base_class_name,
                     is_class=True,
                     package=scope_name,
@@ -160,6 +196,10 @@ def dump_source2(
                 )
             )
 
+    if skipped_invalid_classes:
+        _log(f"[Source2] Skipped {skipped_invalid_classes} invalid class bindings.")
+    if skipped_invalid_fields:
+        _log(f"[Source2] Skipped {skipped_invalid_fields} invalid fields.")
     _log(f"[Source2] Walk complete. {len(structs)} structs, {total_props} properties.")
     
     if progress_callback:

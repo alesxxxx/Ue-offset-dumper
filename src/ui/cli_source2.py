@@ -80,6 +80,57 @@ def _run_source2(args):
     )
     write_source2_sdk(sdk_output_dir, dump, process_name=process_name)
 
+    print(f"\n[>>] Scanning CS2 engine globals...")
+    from src.engines.source2.globals import find_cs2_globals
+    from src.output.source2_globals_writer import (
+        write_cs2_globals_header, write_cs2_globals_json,
+    )
+    handle2 = attach(pid)
+    try:
+        globals_results = find_cs2_globals(
+            handle=handle2, pid=pid, progress_callback=progress,
+            log_fn=lambda m: print(f"  {m}"),
+        )
+    finally:
+        if handle2:
+            detach(handle2)
+    globals_header_path = os.path.join(output_dir, "cs2_offsets.hpp")
+    globals_json_path = os.path.join(output_dir, "cs2_offsets.json")
+    write_cs2_globals_header(globals_header_path, globals_results, process_name=process_name)
+    write_cs2_globals_json(globals_json_path, globals_results, process_name=process_name)
+    globals_ok = sum(1 for r in globals_results if r.found)
+    print(f"  [OK] Engine globals: {globals_ok}/{len(globals_results)} resolved")
+
+    print(f"\n[>>] Scanning CS2 prediction offsets...")
+    from src.engines.source2.prediction_dumper import dump_prediction
+    from src.output.prediction_writer import (
+        write_prediction_header, write_prediction_json,
+    )
+    handle3 = attach(pid)
+    try:
+        pred_dump = dump_prediction(
+            handle=handle3, pid=pid,
+            progress_callback=progress,
+            log_fn=lambda m: print(f"  {m}"),
+        )
+    finally:
+        if handle3:
+            detach(handle3)
+    pred_header_path = os.path.join(output_dir, "cs2_prediction.hpp")
+    pred_json_path = os.path.join(output_dir, "cs2_prediction.json")
+    write_prediction_header(
+        pred_header_path,
+        pred_dump.functions, pred_dump.struct_offsets,
+        process_name=process_name,
+    )
+    write_prediction_json(
+        pred_json_path,
+        pred_dump.functions, pred_dump.struct_offsets,
+        process_name=process_name,
+    )
+    pred_ok = sum(1 for r in pred_dump.all_results if r.found)
+    print(f"  [OK] Prediction offsets: {pred_ok}/{len(pred_dump.all_results)} resolved")
+
     total_size = 0
     for f in os.listdir(output_dir):
         fp = os.path.join(output_dir, f)

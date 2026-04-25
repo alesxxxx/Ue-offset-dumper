@@ -91,6 +91,7 @@ class CUtlTSHashParser:
         """Walk the 256 bucket linked lists (first_uncommitted chains)."""
         elements = []
         limit = max(self.blocks_allocated, 8192)  # safety cap
+        seen_nodes = set()
 
         buckets_base = self.address + self.BUCKETS_OFFSET
 
@@ -99,6 +100,10 @@ class CUtlTSHashParser:
             node_ptr = read_uint64(self.handle, bucket_addr + self.BUCKET_FIRST_UNCOMMITTED)
 
             while node_ptr:
+                if node_ptr in seen_nodes:
+                    break
+                seen_nodes.add(node_ptr)
+
                 # Read UtlTsHashFixedData
                 data_ptr = read_uint64(self.handle, node_ptr + self.FIXED_DATA)
                 if data_ptr:
@@ -115,6 +120,7 @@ class CUtlTSHashParser:
         """Walk the free-blocks blob chain from from the memory pool."""
         elements = []
         limit = max(self.peak_allocated, 8192)  # safety cap
+        seen_nodes = set()
 
         pool_addr = self.address + self.ENTRY_MEM_OFFSET
         # free_blocks is TsListBase { head: TsListHead { next: ptr } }
@@ -123,6 +129,10 @@ class CUtlTSHashParser:
         blob_ptr = read_uint64(self.handle, pool_addr + self.POOL_FREE_BLOCKS)
 
         while blob_ptr:
+            if blob_ptr in seen_nodes:
+                break
+            seen_nodes.add(blob_ptr)
+
             data_ptr = read_uint64(self.handle, blob_ptr + self.BLOB_DATA)
             if data_ptr:
                 elements.append(data_ptr)

@@ -5473,12 +5473,62 @@ class DumperApp:
                     process_name=self.process_name,
                 )
 
+                self._set_progress(90)
+                self._log("[Source2] Scanning engine globals...", "info")
+                from src.engines.source2.globals import find_cs2_globals
+                from src.output.source2_globals_writer import (
+                    write_cs2_globals_header, write_cs2_globals_json,
+                )
+                globals_results = find_cs2_globals(
+                    handle=handle,
+                    pid=self.pid,
+                    progress_callback=_progress,
+                    log_fn=lambda m: self._log(m, "info"),
+                )
+                globals_header_path = os.path.join(output_dir, "cs2_offsets.hpp")
+                globals_json_path = os.path.join(output_dir, "cs2_offsets.json")
+                write_cs2_globals_header(
+                    globals_header_path, globals_results, process_name=self.process_name,
+                )
+                write_cs2_globals_json(
+                    globals_json_path, globals_results, process_name=self.process_name,
+                )
+                globals_ok = sum(1 for r in globals_results if r.found)
+
+                self._log("[Source2] Scanning prediction offsets...", "info")
+                from src.engines.source2.prediction_dumper import dump_prediction
+                from src.output.prediction_writer import (
+                    write_prediction_header, write_prediction_json,
+                )
+                pred_dump = dump_prediction(
+                    handle=handle, pid=self.pid,
+                    progress_callback=_progress,
+                    log_fn=lambda m: self._log(m, "info"),
+                )
+                pred_header_path = os.path.join(output_dir, "cs2_prediction.hpp")
+                pred_json_path = os.path.join(output_dir, "cs2_prediction.json")
+                write_prediction_header(
+                    pred_header_path,
+                    pred_dump.functions, pred_dump.struct_offsets,
+                    process_name=self.process_name,
+                )
+                write_prediction_json(
+                    pred_json_path,
+                    pred_dump.functions, pred_dump.struct_offsets,
+                    process_name=self.process_name,
+                )
+                pred_ok = sum(1 for r in pred_dump.all_results if r.found)
+
                 self._set_progress(100)
                 total_structs = len(sdk_dump.structs)
                 total_props = sum(len(s.members) for s in sdk_dump.structs)
                 self._log(f"[Source2] Done \u2014 {total_structs} structs, {total_props} fields", "ok")
+                self._log(f"[Source2] Engine globals: {globals_ok}/{len(globals_results)} resolved", "ok")
+                self._log(f"[Source2] Prediction offsets: {pred_ok}/{len(pred_dump.all_results)} resolved", "ok")
                 self._log(f"  Saved: {output_dir}", "ok")
                 self._log(f"  Saved: {header_path}", "ok")
+                self._log(f"  Saved: {globals_header_path}", "ok")
+                self._log(f"  Saved: {pred_header_path}", "ok")
                 self._log(f"  Saved: {sdk_output_dir}", "ok")
                 self._set_status("Source 2 dump complete!", GREEN)
                 self._set_info("objects", f"{total_structs:,} structs", FG)
