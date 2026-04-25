@@ -118,7 +118,7 @@ def dump_mono(
 
     log(f"  Walking {len(types)} types...")
     executor = MonoExecutor(types, handle, domain_ptr, mono_base)
-    dump = executor.walk_types(progress_callback=progress_callback)
+    dump = executor.walk_types(progress_callback=progress_callback, log=log)
 
     return dump
 

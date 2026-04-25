@@ -31,7 +31,8 @@ class TypeInfo:
 
 _HAS_DNFILE = importlib.util.find_spec("dnfile") is not None
 
-def _parse_with_dnfile(path: str) -> List[TypeInfo]:
+def _parse_with_dnfile(path: str, log=None) -> List[TypeInfo]:
+    if log is None: log = print
     import dnfile
 
     def _get_index(val) -> Optional[int]:
@@ -360,12 +361,18 @@ def _parse_manual(path: str) -> List[TypeInfo]:
 
     return types
 
-def parse_assembly(path: str) -> List[TypeInfo]:
+def parse_assembly(path: str, log=None) -> List[TypeInfo]:
+    if log is None: log = print
     if _HAS_DNFILE:
         try:
-            return _parse_with_dnfile(path)
+            return _parse_with_dnfile(path, log=log)
         except Exception as e:
-            print(f"[DEBUG] Mono: dnfile parse failed for {path}: {e}")
+            try:
+                import traceback
+                log(f"  [!!] dnfile failed for {path}: {e}")
+                log(f"  {traceback.format_exc()}")
+            except Exception:
+                log(f"[DEBUG] Mono: dnfile parse failed for {path}: {e}")
             return _parse_manual(path)
     return _parse_manual(path)
 
@@ -421,7 +428,7 @@ def parse_managed_dir(managed_dir: str, game_only: bool = True, log=None) -> Lis
         size_mb = os.path.getsize(fp) / 1024 / 1024
         log(f"  Parsing {basename} ({size_mb:.1f} MB)...")
         try:
-            types = parse_assembly(fp)
+            types = parse_assembly(fp, log=log)
             if types:
                 log(f"  [OK] {basename}: {len(types)} types")
                 all_types.extend(types)
