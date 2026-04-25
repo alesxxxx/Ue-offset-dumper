@@ -6679,7 +6679,11 @@ class DumperApp:
         except Exception:
             pass
 
-        dump = dump_mono(handle, self.pid, self.process_name, progress_callback=progress)
+        def mono_log(msg):
+            for line in str(msg).split("\n"):
+                self._log(line, "dim")
+
+        dump = dump_mono(handle, self.pid, self.process_name, progress_callback=progress, log=mono_log)
         elapsed = time.time() - start_time
         output_dir = self.output_var.get()
         from src.output.json_writer import write_all

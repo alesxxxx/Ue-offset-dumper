@@ -355,7 +355,9 @@ def parse_assembly(path: str) -> List[TypeInfo]:
             return _parse_manual(path)
     return _parse_manual(path)
 
-def parse_managed_dir(managed_dir: str, game_only: bool = True) -> List[TypeInfo]:
+def parse_managed_dir(managed_dir: str, game_only: bool = True, log=None) -> List[TypeInfo]:
+    if log is None:
+        log = print
     all_types: List[TypeInfo] = []
 
     if not _HAS_DNFILE:
@@ -368,11 +370,11 @@ def parse_managed_dir(managed_dir: str, game_only: bool = True) -> List[TypeInfo
             )
         except Exception:
             pass
-        print("[!!] FATAL: dnfile not installed! Cannot parse managed .NET assemblies.")
+        log("[!!] FATAL: dnfile not installed! Cannot parse managed .NET assemblies.")
         return all_types
 
     if not os.path.isdir(managed_dir):
-        print(f"[!!] Managed directory not found: {managed_dir}")
+        log(f"[!!] Managed directory not found: {managed_dir}")
         return all_types
 
     priority = ["Assembly-CSharp.dll", "Assembly-CSharp-firstpass.dll"]
@@ -395,19 +397,26 @@ def parse_managed_dir(managed_dir: str, game_only: bool = True) -> List[TypeInfo
                 dll_files.append(fp)
 
     if not dll_files:
-        print(f"[!!] No Assembly-CSharp.dll found in {managed_dir}")
+        log(f"[!!] No Assembly-CSharp.dll found in {managed_dir}")
+        all_dlls = [f for f in os.listdir(managed_dir) if f.endswith(".dll")]
+        log(f"  Available DLLs ({len(all_dlls)}): {', '.join(all_dlls[:10])}{'...' if len(all_dlls) > 10 else ''}")
         return all_types
 
     for fp in dll_files:
         basename = os.path.basename(fp)
         size_mb = os.path.getsize(fp) / 1024 / 1024
-        print(f"  Parsing {basename} ({size_mb:.1f} MB)...", flush=True)
+        log(f"  Parsing {basename} ({size_mb:.1f} MB)...")
         try:
             types = parse_assembly(fp)
             if types:
-                print(f"  [OK] {basename}: {len(types)} types")
+                log(f"  [OK] {basename}: {len(types)} types")
                 all_types.extend(types)
+            else:
+                log(f"  [--] {basename}: 0 types returned")
         except Exception as e:
-            print(f"  [--] {basename}: {e}")
+            import traceback
+            log(f"  [!!] {basename}: {e}")
+            log(f"  {traceback.format_exc()}")
 
     return all_types
+

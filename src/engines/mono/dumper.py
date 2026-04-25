@@ -11,7 +11,11 @@ from src.core.models import SDKDump
 def find_managed_dir(
     process_name: str,
     managed_path: Optional[str] = None,
+    log=None,
 ) -> Optional[str]:
+    if log is None:
+        log = print
+
     if managed_path and os.path.isdir(managed_path):
         return os.path.abspath(managed_path)
 
@@ -21,9 +25,11 @@ def find_managed_dir(
         from src.engines.ue.detector import _find_exe_from_process
         exe_path = _find_exe_from_process(process_name)
         if exe_path:
+            log(f"  [OK] Exe path: {exe_path}")
             exe_dir = os.path.dirname(exe_path)
             data_dir_name = os.path.basename(exe_path).replace(".exe", "") + "_Data"
             candidate = os.path.join(exe_dir, data_dir_name, "Managed")
+            log(f"  Checking: {candidate}")
             if os.path.isdir(candidate):
                 return os.path.abspath(candidate)
 
@@ -31,15 +37,19 @@ def find_managed_dir(
                 for item in os.listdir(exe_dir):
                     if item.endswith("_Data"):
                         candidate = os.path.join(exe_dir, item, "Managed")
+                        log(f"  Checking: {candidate}")
                         if os.path.isdir(candidate):
                             return os.path.abspath(candidate)
-    except Exception:
-        pass
+        else:
+            log(f"  [--] Could not resolve exe path for {process_name}")
+    except Exception as e:
+        log(f"  [--] Exe path resolution error: {e}")
 
     candidate = os.path.join("games", game_dir, "Managed")
     if os.path.isdir(candidate):
         return os.path.abspath(candidate)
 
+    log(f"  Searching for Assembly-CSharp.dll recursively...")
     pattern = os.path.join("**", "*_Data", "Managed", "Assembly-CSharp.dll")
     matches = glob.glob(pattern, recursive=True)
     if matches:
@@ -50,7 +60,7 @@ def find_managed_dir(
     if matches2:
         return os.path.abspath(os.path.dirname(matches2[0]))
 
-    print(
+    log(
         f"[!!] Could not find Managed/ directory.\n"
         f"     Expected locations:\n"
         f"       - games/{game_dir}/Managed/\n"
@@ -65,47 +75,53 @@ def dump_mono(
     process_name: str,
     managed_path: Optional[str] = None,
     progress_callback=None,
+    log=None,
 ) -> SDKDump:
-    managed_dir = find_managed_dir(process_name, managed_path)
+    if log is None:
+        log = print
+
+    log(f"  Finding Managed directory for {process_name}...")
+    managed_dir = find_managed_dir(process_name, managed_path, log=log)
     if not managed_dir:
-        print("[!!] Mono: Cannot proceed without Managed/ directory")
+        log("[!!] Mono: Cannot proceed without Managed/ directory")
         return SDKDump()
 
-    print(f"  [OK] Managed: {managed_dir}")
-    print(f"\n  Parsing .NET assemblies from disk...")
+    log(f"  [OK] Managed: {managed_dir}")
+    log(f"  Parsing .NET assemblies from disk...")
 
-    types = parse_managed_dir(managed_dir)
+    types = parse_managed_dir(managed_dir, log=log)
     if not types:
-        print("  [!!] No types found in assemblies")
+        log("  [!!] No types found in assemblies")
         return SDKDump()
 
-    print(f"  [OK] {len(types)} types parsed from disk")
+    log(f"  [OK] {len(types)} types parsed from disk")
 
-    print(f"\n  Finding Mono runtime in process memory...")
+    log(f"  Finding Mono runtime in process memory...")
     mono_base, mono_size, mono_name = find_mono_module(pid)
     domain_ptr = 0
 
     if mono_base:
-        print(f"  [OK] {mono_name}: 0x{mono_base:X} ({mono_size // 1024} KB)")
+        log(f"  [OK] {mono_name}: 0x{mono_base:X} ({mono_size // 1024} KB)")
         domain_ptr = find_root_domain(handle, mono_base, mono_size)
         if domain_ptr:
-            print(f"  [OK] Root domain: 0x{domain_ptr:X}")
+            log(f"  [OK] Root domain: 0x{domain_ptr:X}")
         else:
-            print(
+            log(
                 "  [--] Could not find Mono root domain.\n"
                 "       Field offsets will be estimated (names still available)."
             )
     else:
-        print(
+        log(
             "  [--] Mono runtime module not found.\n"
             "       Dumping from disk metadata only (no field offsets)."
         )
 
-    print(f"\n  Walking {len(types)} types...")
+    log(f"  Walking {len(types)} types...")
     executor = MonoExecutor(types, handle, domain_ptr, mono_base)
     dump = executor.walk_types(progress_callback=progress_callback)
 
     return dump
+
 
 def dump_mono_walker(
     handle: int,
