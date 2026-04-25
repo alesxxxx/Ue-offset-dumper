@@ -34,6 +34,26 @@ _HAS_DNFILE = importlib.util.find_spec("dnfile") is not None
 def _parse_with_dnfile(path: str) -> List[TypeInfo]:
     import dnfile
 
+    def _get_index(val) -> Optional[int]:
+        if val is None:
+            return None
+        if isinstance(val, int):
+            return val
+        if hasattr(val, "row_index"):
+            return val.row_index
+        if hasattr(val, "value"):
+            return val.value
+        if hasattr(val, "index"):
+            return val.index
+        try:
+            return int(val)
+        except Exception:
+            try:
+                return int(getattr(val, "__int__")())
+            except Exception:
+                pass
+        return None
+
     pe = dnfile.dnPE(path)
     types: List[TypeInfo] = []
 
@@ -96,28 +116,19 @@ def _parse_with_dnfile(path: str) -> List[TypeInfo]:
         else:
             # Fallback to index-based for older dnfile or unresolved references
             field_start = getattr(row, "FieldList", None)
-            f_start_idx = len(fd_rows)
-            if field_start is not None:
-                if hasattr(field_start, "row_index"):
-                    f_start_idx = field_start.row_index - 1
-                elif isinstance(field_start, int):
-                    f_start_idx = field_start - 1
-                elif hasattr(field_start, "__int__"):
-                    f_start_idx = int(field_start) - 1
+            start_num = _get_index(field_start)
+            if start_num is not None:
+                f_start_idx = start_num - 1
+            else:
+                f_start_idx = len(fd_rows)
 
             f_end_idx = len(fd_rows)
             for j in range(i + 1, len(td_rows)):
                 nxt = getattr(td_rows[j], "FieldList", None)
-                if nxt is not None:
-                    if hasattr(nxt, "row_index"):
-                        f_end_idx = nxt.row_index - 1
-                        break
-                    elif isinstance(nxt, int):
-                        f_end_idx = nxt - 1
-                        break
-                    elif hasattr(nxt, "__int__"):
-                        f_end_idx = int(nxt) - 1
-                        break
+                nxt_num = _get_index(nxt)
+                if nxt_num is not None:
+                    f_end_idx = nxt_num - 1
+                    break
 
             for fi in range(f_start_idx, min(f_end_idx, len(fd_rows))):
                 fd_row = fd_rows[fi]
@@ -140,7 +151,7 @@ def _parse_with_dnfile(path: str) -> List[TypeInfo]:
         # ---------------- Methods ----------------
         methods = []
         method_list_obj = getattr(row, "MethodList", None)
-        if isinstance(method_list_obj, list) or (hasattr(method_list_obj, "__iter__") and not hasattr(method_list_obj, "row_index") and not isinstance(method_list_obj, str)):
+        if isinstance(method_list_obj, list) or (hasattr(method_list_obj, "__iter__") and not hasattr(method_list_obj, "row_index") and not isinstance(method_list_obj, str) and not hasattr(method_list_obj, "value")):
             # Native dnfile resolved list of Method rows
             for md_row in method_list_obj:
                 mname = str(getattr(md_row, "Name", "")) or ""
@@ -148,28 +159,19 @@ def _parse_with_dnfile(path: str) -> List[TypeInfo]:
                     methods.append(MethodInfo(name=mname, return_type=""))
         else:
             method_start = getattr(row, "MethodList", None)
-            m_start_idx = len(md_rows)
-            if method_start is not None:
-                if hasattr(method_start, "row_index"):
-                    m_start_idx = method_start.row_index - 1
-                elif isinstance(method_start, int):
-                    m_start_idx = method_start - 1
-                elif hasattr(method_start, "__int__"):
-                    m_start_idx = int(method_start) - 1
+            start_m_num = _get_index(method_start)
+            if start_m_num is not None:
+                m_start_idx = start_m_num - 1
+            else:
+                m_start_idx = len(md_rows)
 
             m_end_idx = len(md_rows)
             for j in range(i + 1, len(td_rows)):
                 nxt = getattr(td_rows[j], "MethodList", None)
-                if nxt is not None:
-                    if hasattr(nxt, "row_index"):
-                        m_end_idx = nxt.row_index - 1
-                        break
-                    elif isinstance(nxt, int):
-                        m_end_idx = nxt - 1
-                        break
-                    elif hasattr(nxt, "__int__"):
-                        m_end_idx = int(nxt) - 1
-                        break
+                nxt_num = _get_index(nxt)
+                if nxt_num is not None:
+                    m_end_idx = nxt_num - 1
+                    break
 
             for mi in range(m_start_idx, min(m_end_idx, len(md_rows))):
                 md_row = md_rows[mi]
