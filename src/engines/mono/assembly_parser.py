@@ -111,8 +111,19 @@ def _parse_with_dnfile(path: str, log=None) -> List[TypeInfo]:
             except Exception:
                 pass
         if isinstance(field_list_obj, list) or (hasattr(field_list_obj, "__iter__") and not hasattr(field_list_obj, "row_index") and not isinstance(field_list_obj, str) and not hasattr(field_list_obj, "value") and not hasattr(field_list_obj, "table")):
-            # Native dnfile resolved list of Field rows
-            for fi, fd_row in enumerate(field_list_obj):
+            # Native dnfile resolved list of Field rows or indices
+            for fi, fd_obj in enumerate(field_list_obj):
+                fd_row = fd_obj
+                if hasattr(fd_obj, "row_index") and not hasattr(fd_obj, "Name"):
+                    # Elements are MDTableIndex references, dereference them
+                    actual_idx = fd_obj.row_index - 1
+                    if 0 <= actual_idx < len(fd_rows):
+                        fd_row = fd_rows[actual_idx]
+                elif isinstance(fd_obj, int):
+                    actual_idx = fd_obj - 1
+                    if 0 <= actual_idx < len(fd_rows):
+                        fd_row = fd_rows[actual_idx]
+
                 fname = str(getattr(fd_row, "Name", "")) or ""
                 if not fname:
                     continue
@@ -167,8 +178,18 @@ def _parse_with_dnfile(path: str, log=None) -> List[TypeInfo]:
         methods = []
         method_list_obj = getattr(row, "MethodList", None)
         if isinstance(method_list_obj, list) or (hasattr(method_list_obj, "__iter__") and not hasattr(method_list_obj, "row_index") and not isinstance(method_list_obj, str) and not hasattr(method_list_obj, "value")):
-            # Native dnfile resolved list of Method rows
-            for md_row in method_list_obj:
+            # Native dnfile resolved list of Method rows or indices
+            for md_obj in method_list_obj:
+                md_row = md_obj
+                if hasattr(md_obj, "row_index") and not hasattr(md_obj, "Name"):
+                    actual_idx = md_obj.row_index - 1
+                    if 0 <= actual_idx < len(md_rows):
+                        md_row = md_rows[actual_idx]
+                elif isinstance(md_obj, int):
+                    actual_idx = md_obj - 1
+                    if 0 <= actual_idx < len(md_rows):
+                        md_row = md_rows[actual_idx]
+
                 mname = str(getattr(md_row, "Name", "")) or ""
                 if mname:
                     methods.append(MethodInfo(name=mname, return_type=""))
