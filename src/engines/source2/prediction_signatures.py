@@ -43,6 +43,8 @@ ALL_PREDICTION_SIGS: List[CS2PredictionSig] = [
     # ------------------------------------------------------------------
     # fnGetUserCmd — internal function to fetch CUserCmd at a sequence.
     # Resolved via E8 call.
+    # NOTE: Patterns frequently break after CS2 updates. If this fails,
+    # use fnCreateMove (direct hook) or fnValidateInput as alternatives.
     # ------------------------------------------------------------------
     CS2PredictionSig(
         name="fnGetUserCmd",
@@ -50,6 +52,8 @@ ALL_PREDICTION_SIGS: List[CS2PredictionSig] = [
         patterns=[
             "E8 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? 45 33 E4 48 89 44 24",
             "E8 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? 45 33 ?? 48 89 44 24",
+            "E8 ?? ?? ?? ?? 48 8B D0 48 8B CE",
+            "E8 ?? ?? ?? ?? 44 8B E0 48 8B CF",
         ],
         resolve="call",
         description="GetUserCmd — retrieves CUserCmd at a given sequence number.",
@@ -119,6 +123,49 @@ ALL_PREDICTION_SIGS: List[CS2PredictionSig] = [
     ),
 
     # ------------------------------------------------------------------
+    # fnCreateMove — classic client-side tick hook point.
+    # Direct function prologue match. Often more stable than
+    # fnClientSidePrediction for CUserCmd mutation.
+    # ------------------------------------------------------------------
+    CS2PredictionSig(
+        name="fnCreateMove",
+        module="client.dll",
+        patterns=[
+            "48 8B C4 4C 89 40 ? 48 89 48 ? 55 53 41 54",
+        ],
+        resolve="direct",
+        description="CreateMove — classic client-side tick hook for CUserCmd mutation.",
+    ),
+
+    # ------------------------------------------------------------------
+    # fnValidateInput — input validation/processing entry.
+    # Direct function prologue match.
+    # ------------------------------------------------------------------
+    CS2PredictionSig(
+        name="fnValidateInput",
+        module="client.dll",
+        patterns=[
+            "40 53 48 83 EC ? 48 8B D9 E8 ? ? ? ? 33 C0 C6 83 ? ? ? ? 00",
+        ],
+        resolve="direct",
+        description="ValidateInput — input validation/processing function.",
+    ),
+
+    # ------------------------------------------------------------------
+    # fnForceButtonsDown — force button state processing.
+    # Direct function prologue match.
+    # ------------------------------------------------------------------
+    CS2PredictionSig(
+        name="fnForceButtonsDown",
+        module="client.dll",
+        patterns=[
+            "40 53 57 41 56 48 81 EC ? ? ? ? 48 83 79 ? 00",
+        ],
+        resolve="direct",
+        description="ForceButtonsDown — forces button-down state processing.",
+    ),
+
+    # ------------------------------------------------------------------
     # fnProcessMovement — engine movement simulation function.
     # Resolved via E8 call.
     # ------------------------------------------------------------------
@@ -150,6 +197,20 @@ ALL_PREDICTION_SIGS: List[CS2PredictionSig] = [
     ),
 
     # ------------------------------------------------------------------
+    # fnTraceShape — engine trace/raycast function.
+    # Direct function prologue match. Needed for real Trace::Raycast.
+    # ------------------------------------------------------------------
+    CS2PredictionSig(
+        name="fnTraceShape",
+        module="client.dll",
+        patterns=[
+            "48 89 5C 24 ? 48 89 4C 24 ? 55 57",
+        ],
+        resolve="direct",
+        description="TraceShape — engine trace/raycast entry (replaces stubbed Trace::Raycast).",
+    ),
+
+    # ------------------------------------------------------------------
     # fnCalculateShootPosition — shoot position calculator (optional).
     # Direct function prologue match.
     # ------------------------------------------------------------------
@@ -158,6 +219,7 @@ ALL_PREDICTION_SIGS: List[CS2PredictionSig] = [
         module="client.dll",
         patterns=[
             "48 89 5C 24 ?? 48 89 6C 24 ?? 56 57 41 56 48 81 EC ?? ?? ?? ?? 44 8B 92 ?? ?? ?? ??",
+            "48 89 5C 24 ? 48 89 6C 24 ? 56 57 41 56 48 83 EC ?",
         ],
         resolve="direct",
         description="CalculateShootPosition — computes eye position for shots.",
@@ -221,7 +283,7 @@ PREDICTION_STRUCT_FIELDS: List[CS2PredictionStructField] = [
         struct_name="CUserCmd",
         field_name="m_subtick_moves",
         offset=0x58,
-        description="Offset to subtick move actions inside CUserCmd.",
+        description="Offset to subtick move actions inside CUserCmd (CUtlVector).",
     ),
 
     # CBaseUserCmdPB (protobuf struct)
@@ -245,5 +307,29 @@ PREDICTION_STRUCT_FIELDS: List[CS2PredictionStructField] = [
         field_name="viewangles",
         offset=0x40,
         description="View angles (pitch/yaw/roll) inside the base protobuf command.",
+    ),
+
+    # CSubtickMoveStep — individual subtick action (element of CUtlVector at CUserCmd+0x58)
+    # Offsets are community-sourced; verify in-game if movement feels off.
+    CS2PredictionStructField(
+        output_key="CSubtickMoveStep_m_flWhen",
+        struct_name="CSubtickMoveStep",
+        field_name="m_flWhen",
+        offset=0x00,
+        description="Subtick timing fraction (0.0-1.0) for this move step.",
+    ),
+    CS2PredictionStructField(
+        output_key="CSubtickMoveStep_m_nButton",
+        struct_name="CSubtickMoveStep",
+        field_name="m_nButton",
+        offset=0x04,
+        description="Button mask (e.g. IN_JUMP) for this subtick step.",
+    ),
+    CS2PredictionStructField(
+        output_key="CSubtickMoveStep_m_bPressed",
+        struct_name="CSubtickMoveStep",
+        field_name="m_bPressed",
+        offset=0x08,
+        description="True = button pressed, False = button released.",
     ),
 ]
