@@ -20,7 +20,7 @@ class SchemaClassFieldData_t(ctypes.Structure):
         ("name", ctypes.c_uint64), # ptr to string
         ("schema_type", ctypes.c_uint64), # ptr to SchemaType_t
         ("offset", ctypes.c_uint32),
-        ("metadata_size", ctypes.c_uint32),
+        ("metadata_count", ctypes.c_uint32),
         ("metadata", ctypes.c_uint64),
     ]
 
@@ -58,3 +58,53 @@ class CSchemaSystemTypeScope(ctypes.Structure):
 class CSchemaSystem(ctypes.Structure):
     pass
     # contains CUtlVector of type scopes
+
+class SchemaMetadataEntryData_t(ctypes.Structure):
+    _fields_ = [
+        ("name", ctypes.c_uint64), # 0x00 ptr to string
+        ("network_value", ctypes.c_uint64), # 0x08 ptr to SchemaNetworkValue
+    ]
+
+class SchemaEnumInfoData_t(ctypes.Structure):
+    _fields_ = [
+        ("base", ctypes.c_uint64), # 0x00
+        ("name", ctypes.c_uint64), # 0x08
+        ("module_name", ctypes.c_uint64), # 0x10
+        ("size", ctypes.c_uint8), # 0x18
+        ("alignment", ctypes.c_uint8), # 0x19
+        ("flags", ctypes.c_uint8), # 0x1A
+        ("pad0", ctypes.c_uint8), # 0x1B
+        ("enumerator_count", ctypes.c_uint16), # 0x1C
+        ("static_metadata_count", ctypes.c_uint16), # 0x1E
+        ("enumerators", ctypes.c_uint64), # 0x20
+        ("static_metadata", ctypes.c_uint64), # 0x28
+        ("type_scope", ctypes.c_uint64), # 0x30
+        ("min_enumerator_value", ctypes.c_int64), # 0x38
+        ("max_enumerator_value", ctypes.c_int64), # 0x40
+    ]
+
+class SchemaEnumeratorInfoData_t(ctypes.Structure):
+    _fields_ = [
+        ("name", ctypes.c_uint64), # 0x00
+        ("value", ctypes.c_uint64), # 0x08
+        ("metadata_count", ctypes.c_uint32), # 0x10
+        ("pad0", ctypes.c_uint32), # 0x14
+        ("metadata", ctypes.c_uint64), # 0x18
+    ]
+
+class KeyButton(ctypes.Structure):
+    _fields_ = [
+        ("pad0", ctypes.c_uint8 * 0x8),
+        ("name", ctypes.c_uint64), # 0x08
+        ("pad1", ctypes.c_uint8 * 0x20),
+        ("state", ctypes.c_uint32), # 0x30
+        ("pad2", ctypes.c_uint8 * 0x54),
+        ("next", ctypes.c_uint64), # 0x88
+    ]
+
+class InterfaceReg(ctypes.Structure):
+    _fields_ = [
+        ("create_fn", ctypes.c_uint64), # 0x00
+        ("name", ctypes.c_uint64), # 0x08
+        ("next", ctypes.c_uint64), # 0x10
+    ]

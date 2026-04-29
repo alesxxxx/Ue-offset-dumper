@@ -14,7 +14,7 @@ Primary focus is Unreal Engine — tested against UE 4.22 through UE 5.5 across 
 | Unity IL2CPP | global-metadata.dat parser + PE scanner | Confirmed working |
 | Unity Mono | Managed assembly reflection | Confirmed working |
 | Source Engine | Netvar scanner | TF2 / L4D2 (Source 1) |
-| Source 2 Engine | Schema scanner | Counter-Strike 2 (CS2) |
+| Source 2 Engine | Schema + runtime registry scanner | Counter-Strike 2 (CS2) |
 
 ---
 
@@ -92,6 +92,17 @@ Dumps are written to `output/<ProcessName>/`:
 | `Enums.json` | All UEnum entries |
 | `SDK/` | Generated C++ header files |
 | `health.txt` | Dump quality report |
+
+Source 2 / CS2 dumps also write:
+
+| File | Contents |
+|---|---|
+| `cs2_schemas.hpp` | Aggregated Source 2 classes, fields, enums, and schema metadata |
+| `cs2_offsets.hpp/json` | Engine global RVAs |
+| `cs2_prediction.hpp/json` | Prediction functions and internal command-structure offsets |
+| `cs2_buttons.hpp/json` | Runtime key-button state RVAs from the `KeyButton` list |
+| `cs2_interfaces.hpp/json` | `CreateInterface` registry RVAs by module |
+| `cs2_info.json` | Build number, module inventory, resolved counts, and first-class health failures |
 
 ---
 

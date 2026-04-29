@@ -3,7 +3,7 @@ import re
 from datetime import datetime, timezone
 from typing import Iterable, List, Tuple
 
-from src.core.models import SDKDump, StructInfo
+from src.core.models import EnumInfo, SDKDump, MemberInfo, StructInfo
 
 _IDENT_RE = re.compile(r"[^A-Za-z0-9_]")
 _LEADING_DIGIT_RE = re.compile(r"^[0-9]")
@@ -54,6 +54,20 @@ def _group_by_scope(structs: Iterable[StructInfo]) -> List[Tuple[str, List[Struc
     )
 
 
+def _group_enums_by_scope(enums: Iterable[EnumInfo]) -> dict[str, List[EnumInfo]]:
+    buckets: dict[str, List[EnumInfo]] = {}
+    for enum in enums:
+        key = str(enum.metadata.get("source2_module") or "")
+        if not key and enum.full_name.startswith("Source2."):
+            owner = enum.full_name.rsplit(".", 1)[0]
+            key = owner.replace("Source2.", "", 1)
+        buckets.setdefault(key or "_anon", []).append(enum)
+    return {
+        key: sorted(items, key=lambda item: item.name)
+        for key, items in buckets.items()
+    }
+
+
 def _header_preamble(process_name: str, extra: str = "") -> str:
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
     lines = [
@@ -71,9 +85,70 @@ def _header_preamble(process_name: str, extra: str = "") -> str:
     return "\n".join(lines) + "\n"
 
 
+def _metadata_lines(metadata_items: list, indent: str) -> List[str]:
+    out: List[str] = []
+    for item in metadata_items or []:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name", "")
+        kind = item.get("kind", "unknown")
+        if kind == "network_change_callback":
+            callback = item.get("callback", "")
+            out.append(f"{indent}// metadata: {name} -> {callback}")
+        elif kind == "network_var_names":
+            var_name = item.get("var_name", "")
+            type_name = item.get("type_name", "")
+            out.append(f"{indent}// metadata: {name} -> {var_name}:{type_name}")
+        else:
+            out.append(f"{indent}// metadata: {name}")
+    return out
+
+
+def _emit_member_metadata(member: MemberInfo, indent: str) -> List[str]:
+    metadata = member.metadata.get("source2_metadata") if member.metadata else None
+    return _metadata_lines(metadata, indent)
+
+
+def _emit_enum_block(enum: EnumInfo, indent: str) -> List[str]:
+    out: List[str] = []
+    safe_enum = _sanitize_ident(enum.name)
+    out.extend(_metadata_lines(enum.metadata.get("source2_metadata", []), indent))
+    size = enum.metadata.get("source2_size", "")
+    alignment = enum.metadata.get("source2_alignment", "")
+    if size or alignment:
+        out.append(f"{indent}// size={size} align={alignment}")
+    out.append(f"{indent}enum class {safe_enum} : std::int64_t {{")
+    seen: set[str] = set()
+    for raw_name, value in enum.values:
+        safe_name = _sanitize_ident(raw_name)
+        if safe_name in seen:
+            safe_name = f"{safe_name}_{value & 0xFFFFFFFFFFFFFFFF:X}"
+        seen.add(safe_name)
+        value_text = str(value) if value < 0 else f"0x{value:X}"
+        out.append(f"{indent}    {safe_name} = {value_text},")
+    if not enum.values:
+        out.append(f"{indent}    // no values exported")
+    out.append(f"{indent}}}; // enum class {safe_enum}")
+    return out
+
+
 def _emit_class_block(cls: StructInfo, indent: str) -> List[str]:
     out: List[str] = []
     safe_cls = _sanitize_ident(cls.name)
+    module_name = cls.metadata.get("source2_module") if cls.metadata else ""
+    scope_name = cls.metadata.get("source2_scope") if cls.metadata else ""
+    alignment = cls.metadata.get("source2_alignment") if cls.metadata else ""
+    if module_name or scope_name or alignment:
+        details = []
+        if module_name:
+            details.append(f"module={module_name}")
+        if scope_name and scope_name != module_name:
+            details.append(f"scope={scope_name}")
+        if alignment:
+            details.append(f"align={alignment}")
+        out.append(f"{indent}// {'; '.join(details)}")
+    if cls.metadata:
+        out.extend(_metadata_lines(cls.metadata.get("source2_metadata", []), indent))
     out.append(f"{indent}namespace {safe_cls} {{")
     if cls.size:
         out.append(f"{indent}    inline constexpr std::size_t __size = 0x{cls.size:X};")
@@ -88,6 +163,7 @@ def _emit_class_block(cls: StructInfo, indent: str) -> List[str]:
         if safe in seen:
             safe = f"{safe}_0x{m.offset:X}"
         seen.add(safe)
+        out.extend(_emit_member_metadata(m, indent + "    "))
         type_comment = f" // {m.type_name}" if m.type_name and m.type_name != "Unknown" else ""
         out.append(
             f"{indent}    inline constexpr std::ptrdiff_t {safe} = 0x{m.offset:X};{type_comment}"
@@ -100,22 +176,40 @@ def write_source2_header(path: str, sdk_dump: SDKDump, process_name: str) -> Non
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
 
     grouped = _group_by_scope(sdk_dump.structs)
+    grouped_enums = _group_enums_by_scope(sdk_dump.enums)
     total_classes = sum(len(v) for _, v in grouped)
     total_fields = sum(len(s.members) for _, v in grouped for s in v)
+    total_enums = len(sdk_dump.enums)
 
     lines: List[str] = []
     lines.append(_header_preamble(
         process_name,
-        extra=f"Scopes: {len(grouped)} | Classes: {total_classes} | Fields: {total_fields}",
+        extra=f"Scopes: {len(grouped)} | Classes: {total_classes} | Enums: {total_enums} | Fields: {total_fields}",
     ))
     lines.append("namespace Schemas {")
     lines.append("")
     for scope, classes in grouped:
         ns = _sanitize_namespace(scope)
-        lines.append(f"// Scope: {scope} ({len(classes)} classes)")
+        enum_items = grouped_enums.pop(scope, [])
+        lines.append(f"// Scope: {scope} ({len(classes)} classes, {len(enum_items)} enums)")
         lines.append(f"namespace {ns} {{")
+        if enum_items:
+            lines.append("// Enums")
+            for enum in enum_items:
+                lines.extend(_emit_enum_block(enum, indent="    "))
+                lines.append("")
+            lines.append("// Classes")
         for cls in classes:
             lines.extend(_emit_class_block(cls, indent="    "))
+            lines.append("")
+        lines.append(f"}} // namespace {ns}")
+        lines.append("")
+    for scope, enum_items in sorted(grouped_enums.items(), key=lambda item: item[0]):
+        ns = _sanitize_namespace(scope)
+        lines.append(f"// Scope: {scope} (0 classes, {len(enum_items)} enums)")
+        lines.append(f"namespace {ns} {{")
+        for enum in enum_items:
+            lines.extend(_emit_enum_block(enum, indent="    "))
             lines.append("")
         lines.append(f"}} // namespace {ns}")
         lines.append("")

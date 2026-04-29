@@ -108,6 +108,9 @@ class _StdoutTee:
         if _DEBUG_ENABLED and _log_file:
             _log_file.flush()
 
+    def isatty(self):
+        return getattr(self.original_stdout, "isatty", lambda: False)()
+
 def enable_stdout_tee():
     if not isinstance(sys.stdout, _StdoutTee):
         sys.stdout = _StdoutTee(sys.stdout)

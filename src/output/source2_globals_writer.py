@@ -34,6 +34,15 @@ def _group_by_module(results: Iterable[CS2GlobalResult]):
     return sorted(buckets.items(), key=lambda kv: kv[0])
 
 
+def _format_semantics(r: CS2GlobalResult) -> str:
+    parts = [f"kind={r.value_kind}", f"type={r.value_type}"]
+    if r.source_base_from and r.source_field_offset is not None:
+        parts.append(f"computed_from={r.source_base_from}+0x{r.source_field_offset:X}")
+    elif r.source_field_offset is not None:
+        parts.append(f"field_offset=0x{r.source_field_offset:X}")
+    return "; ".join(parts)
+
+
 def write_cs2_globals_header(path: str, results: List[CS2GlobalResult], process_name: str) -> None:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
@@ -58,6 +67,7 @@ def write_cs2_globals_header(path: str, results: List[CS2GlobalResult], process_
         for r in items:
             if r.description:
                 lines.append(f"    // {r.description}")
+            lines.append(f"    // {_format_semantics(r)}")
             if r.found:
                 lines.append(
                     f"    inline constexpr std::ptrdiff_t {r.name} = 0x{r.rva:X};"
@@ -91,13 +101,34 @@ def write_cs2_globals_json(path: str, results: List[CS2GlobalResult], process_na
         mod_map: dict = {}
         for r in items:
             if r.found:
-                mod_map[r.name] = {
+                entry = {
                     "rva": f"0x{r.rva:X}",
                     "rva_int": r.rva,
+                    "value_kind": r.value_kind,
+                    "value_type": r.value_type,
                     "description": r.description,
                 }
+                if r.source_base_from:
+                    entry["computed_from"] = {
+                        "base": r.source_base_from,
+                        "field_offset": (
+                            f"0x{r.source_field_offset:X}"
+                            if r.source_field_offset is not None
+                            else None
+                        ),
+                        "field_offset_int": r.source_field_offset,
+                    }
+                elif r.source_field_offset is not None:
+                    entry["field_offset"] = f"0x{r.source_field_offset:X}"
+                    entry["field_offset_int"] = r.source_field_offset
+                mod_map[r.name] = entry
             else:
-                mod_map[r.name] = {"error": r.error, "description": r.description}
+                mod_map[r.name] = {
+                    "error": r.error,
+                    "value_kind": r.value_kind,
+                    "value_type": r.value_type,
+                    "description": r.description,
+                }
         payload["globals"][module] = mod_map
 
     with open(path, "w", encoding="utf-8") as f:

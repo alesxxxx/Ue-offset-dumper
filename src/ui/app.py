@@ -5495,6 +5495,58 @@ class DumperApp:
                 )
                 globals_ok = sum(1 for r in globals_results if r.found)
 
+                self._set_progress(92)
+                self._log("[Source2] Scanning key buttons and interfaces...", "info")
+                from src.core.memory import enumerate_modules, get_module_info, read_uint32
+                from src.engines.source2.buttons import find_cs2_buttons
+                from src.engines.source2.interfaces import find_cs2_interfaces
+                from src.output.source2_runtime_writer import (
+                    write_cs2_buttons_header,
+                    write_cs2_buttons_json,
+                    write_cs2_info_json,
+                    write_cs2_interfaces_header,
+                    write_cs2_interfaces_json,
+                )
+
+                buttons_results = find_cs2_buttons(
+                    handle=handle,
+                    process_name=self.process_name,
+                    progress_callback=_progress,
+                    log_fn=lambda m: self._log(m, "info"),
+                )
+                interfaces_results = find_cs2_interfaces(
+                    handle=handle,
+                    process_name=self.process_name,
+                    progress_callback=_progress,
+                    log_fn=lambda m: self._log(m, "info"),
+                )
+                buttons_header_path = os.path.join(output_dir, "cs2_buttons.hpp")
+                buttons_json_path = os.path.join(output_dir, "cs2_buttons.json")
+                interfaces_header_path = os.path.join(output_dir, "cs2_interfaces.hpp")
+                interfaces_json_path = os.path.join(output_dir, "cs2_interfaces.json")
+                write_cs2_buttons_header(
+                    buttons_header_path,
+                    buttons_results,
+                    process_name=self.process_name,
+                )
+                write_cs2_buttons_json(
+                    buttons_json_path,
+                    buttons_results,
+                    process_name=self.process_name,
+                )
+                write_cs2_interfaces_header(
+                    interfaces_header_path,
+                    interfaces_results,
+                    process_name=self.process_name,
+                )
+                write_cs2_interfaces_json(
+                    interfaces_json_path,
+                    interfaces_results,
+                    process_name=self.process_name,
+                )
+                buttons_ok = sum(1 for r in buttons_results if r.found and r.name)
+                interfaces_ok = sum(len(r.interfaces) for r in interfaces_results)
+
                 self._log("[Source2] Scanning prediction offsets...", "info")
                 from src.engines.source2.prediction_dumper import dump_prediction
                 from src.output.prediction_writer import (
@@ -5519,19 +5571,60 @@ class DumperApp:
                 )
                 pred_ok = sum(1 for r in pred_dump.all_results if r.found)
 
+                build_number = 0
+                build_result = next(
+                    (r for r in globals_results if r.found and r.name == "dwBuildNumber"),
+                    None,
+                )
+                if build_result:
+                    module_base, _ = get_module_info(self.pid, build_result.module)
+                    if module_base:
+                        build_number = read_uint32(handle, module_base + build_result.rva)
+
+                module_inventory = [
+                    {
+                        "name": name,
+                        "base": f"0x{base:X}",
+                        "base_int": base,
+                        "size": size,
+                        "path": path,
+                    }
+                    for name, base, size, path in enumerate_modules(self.pid)
+                ]
+                info_path = os.path.join(output_dir, "cs2_info.json")
+                elapsed_seconds = max(0.0, time.time() - getattr(self, "_scan_started_at", time.time()))
+                write_cs2_info_json(
+                    info_path,
+                    process_name=self.process_name,
+                    sdk_dump=sdk_dump,
+                    globals_results=globals_results,
+                    buttons_results=buttons_results,
+                    interfaces_results=interfaces_results,
+                    prediction_dump=pred_dump,
+                    build_number=build_number,
+                    modules=module_inventory,
+                    elapsed_seconds=elapsed_seconds,
+                )
+
                 self._set_progress(100)
                 total_structs = len(sdk_dump.structs)
+                total_enums = len(sdk_dump.enums)
                 total_props = sum(len(s.members) for s in sdk_dump.structs)
-                self._log(f"[Source2] Done \u2014 {total_structs} structs, {total_props} fields", "ok")
+                self._log(f"[Source2] Done \u2014 {total_structs} structs, {total_enums} enums, {total_props} fields", "ok")
                 self._log(f"[Source2] Engine globals: {globals_ok}/{len(globals_results)} resolved", "ok")
+                self._log(f"[Source2] Key buttons: {buttons_ok} resolved", "ok" if buttons_ok else "warn")
+                self._log(f"[Source2] Interfaces: {interfaces_ok} resolved", "ok" if interfaces_ok else "warn")
                 self._log(f"[Source2] Prediction offsets: {pred_ok}/{len(pred_dump.all_results)} resolved", "ok")
                 self._log(f"  Saved: {output_dir}", "ok")
                 self._log(f"  Saved: {header_path}", "ok")
                 self._log(f"  Saved: {globals_header_path}", "ok")
+                self._log(f"  Saved: {buttons_header_path}", "ok")
+                self._log(f"  Saved: {interfaces_header_path}", "ok")
                 self._log(f"  Saved: {pred_header_path}", "ok")
+                self._log(f"  Saved: {info_path}", "ok")
                 self._log(f"  Saved: {sdk_output_dir}", "ok")
                 self._set_status("Source 2 dump complete!", GREEN)
-                self._set_info("objects", f"{total_structs:,} structs", FG)
+                self._set_info("objects", f"{total_structs:,} structs / {total_enums:,} enums", FG)
 
                 self._maybe_send_webhook_gui(
                     process_name=self.process_name,

@@ -152,3 +152,12 @@ def get_type_scope_classes(handle: int, type_scope_ptr: int) -> List[int]:
     """
     hash_parser = CUtlTSHashParser(handle, type_scope_ptr + 0x560)
     return hash_parser.iter_elements()
+
+
+def get_type_scope_enums(handle: int, type_scope_ptr: int) -> List[int]:
+    """Extract SchemaEnumInfoData pointers from CSchemaSystemTypeScope.
+
+    enum_bindings (UtlTsHash<SchemaEnumBinding>) is at +0x1DD0 in the TypeScope.
+    """
+    hash_parser = CUtlTSHashParser(handle, type_scope_ptr + 0x1DD0)
+    return hash_parser.iter_elements()

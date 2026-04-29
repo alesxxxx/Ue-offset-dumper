@@ -13,15 +13,15 @@ entry into IDA-style `?? ??` form and explicit disp_offset/instruction_size.
 
 Two resolution modes:
 
-    mode="rip"     (default) — match pattern, read 32-bit RIP-relative
+    mode="rip"     (default) - match pattern, read 32-bit RIP-relative
                                displacement at disp_offset, compute
                                target = match + instr_size + disp.
-    mode="literal_u32"       — match pattern, read plain 32-bit value at
+    mode="literal_u32"       - match pattern, read plain 32-bit value at
                                disp_offset as a field offset, and add it
                                to the RVA of the global named `base_from`.
-                               Used for globals that live inside another
-                               global's struct (dwLocalPlayerPawn inside
-                               dwPrediction, dwViewAngles inside dwCSGOInput).
+                               When base_from is set, the emitted value is the
+                               final module-relative address of that field, not
+                               the raw field offset.
 
 The scanner yields module-relative offsets (address minus module base),
 matching the cs2-dumper community convention.
@@ -48,6 +48,8 @@ class CS2Global:
     extra_offset: int = 0
     mode: str = "rip"
     base_from: Optional[str] = None
+    value_kind: str = "address"
+    value_type: str = "uintptr_t"
     description: str = ""
 
 
@@ -80,6 +82,8 @@ ALL_CS2_GLOBALS: List[CS2Global] = [
         pattern="FF 81 ?? ?? ?? ?? 48 85 D2",
         disp_offset=2, instruction_size=6,
         mode="literal_u32",
+        value_kind="field_offset",
+        value_type="uint32_t",
         description="Field offset within CGameEntitySystem to highest_entity_index (u32 count).",
     ),
     CS2Global(
@@ -108,7 +112,8 @@ ALL_CS2_GLOBALS: List[CS2Global] = [
         module="client.dll",
         pattern="48 8B 05 ?? ?? ?? ?? 41 89 BE",
         disp_offset=3, instruction_size=7,
-        description="Local CCSPlayerController handle pointer.",
+        value_type="CCSPlayerController*",
+        description="Local CCSPlayerController pointer.",
     ),
     CS2Global(
         name="dwLocalPlayerPawn",
@@ -117,7 +122,11 @@ ALL_CS2_GLOBALS: List[CS2Global] = [
         disp_offset=3, instruction_size=0,
         mode="literal_u32",
         base_from="dwPrediction",
-        description="Local C_CSPlayerPawn handle (field offset inside CCSGameMovement / dwPrediction).",
+        value_type="C_CSPlayerPawn*",
+        description=(
+            "Local C_CSPlayerPawn pointer. Computed from dwPrediction + field offset; "
+            "read the emitted address as uintptr_t, not CHandle."
+        ),
     ),
     CS2Global(
         name="dwPlantedC4",
@@ -131,7 +140,7 @@ ALL_CS2_GLOBALS: List[CS2Global] = [
         module="client.dll",
         pattern="48 8D 05 ?? ?? ?? ?? C3 CC CC CC CC CC CC CC CC 40 53 56 41 54",
         disp_offset=3, instruction_size=7,
-        description="CCSGameMovement / prediction singleton. Base for dwLocalPlayerPawn.",
+        description="CCSGameMovement / prediction singleton. Base used to locate dwLocalPlayerPawn.",
     ),
     CS2Global(
         name="dwSensitivity",
@@ -238,6 +247,10 @@ class CS2GlobalResult:
     rva: int
     absolute: int
     description: str = ""
+    value_kind: str = "address"
+    value_type: str = "uintptr_t"
+    source_base_from: Optional[str] = None
+    source_field_offset: Optional[int] = None
     found: bool = True
     error: str = ""
 
@@ -260,7 +273,8 @@ def _scan_rip(
     if not hits:
         return CS2GlobalResult(
             name=entry.name, module=entry.module, rva=0, absolute=0,
-            description=entry.description, found=False, error="pattern not matched",
+            description=entry.description, value_kind=entry.value_kind,
+            value_type=entry.value_type, found=False, error="pattern not matched",
         )
     target = resolve_rip(
         handle, hits[0],
@@ -270,19 +284,22 @@ def _scan_rip(
     if not target:
         return CS2GlobalResult(
             name=entry.name, module=entry.module, rva=0, absolute=0,
-            description=entry.description, found=False, error="rip resolution returned 0",
+            description=entry.description, value_kind=entry.value_kind,
+            value_type=entry.value_type, found=False, error="rip resolution returned 0",
         )
     target += entry.extra_offset
     rva = target - module_base
     if rva < 0 or rva >= module_size + 0x400000:
         return CS2GlobalResult(
             name=entry.name, module=entry.module, rva=0, absolute=target,
-            description=entry.description, found=False,
+            description=entry.description, value_kind=entry.value_kind,
+            value_type=entry.value_type, found=False,
             error=f"resolved address 0x{target:X} outside {entry.module}",
         )
     return CS2GlobalResult(
         name=entry.name, module=entry.module,
-        rva=rva, absolute=target, description=entry.description, found=True,
+        rva=rva, absolute=target, description=entry.description,
+        value_kind=entry.value_kind, value_type=entry.value_type, found=True,
     )
 
 
@@ -299,7 +316,9 @@ def _scan_literal(
         if base is None or not base.found:
             return CS2GlobalResult(
                 name=entry.name, module=entry.module, rva=0, absolute=0,
-                description=entry.description, found=False,
+                description=entry.description, value_kind=entry.value_kind,
+                value_type=entry.value_type, source_base_from=entry.base_from,
+                found=False,
                 error=f"base_from {entry.base_from!r} unresolved",
             )
         base_rva = base.rva
@@ -308,19 +327,25 @@ def _scan_literal(
     if not hits:
         return CS2GlobalResult(
             name=entry.name, module=entry.module, rva=0, absolute=0,
-            description=entry.description, found=False, error="pattern not matched",
+            description=entry.description, value_kind=entry.value_kind,
+            value_type=entry.value_type, source_base_from=entry.base_from,
+            found=False, error="pattern not matched",
         )
     disp = _read_literal_u32(handle, hits[0] + entry.disp_offset)
     if disp is None:
         return CS2GlobalResult(
             name=entry.name, module=entry.module, rva=0, absolute=0,
-            description=entry.description, found=False, error="literal u32 read failed",
+            description=entry.description, value_kind=entry.value_kind,
+            value_type=entry.value_type, source_base_from=entry.base_from,
+            found=False, error="literal u32 read failed",
         )
     rva = base_rva + disp + entry.extra_offset
     return CS2GlobalResult(
         name=entry.name, module=entry.module,
         rva=rva, absolute=module_base + rva,
-        description=entry.description, found=True,
+        description=entry.description, value_kind=entry.value_kind,
+        value_type=entry.value_type, source_base_from=entry.base_from,
+        source_field_offset=disp + entry.extra_offset, found=True,
     )
 
 
@@ -336,7 +361,8 @@ def _scan_one(
     if not module_base or not module_size:
         return CS2GlobalResult(
             name=entry.name, module=entry.module, rva=0, absolute=0,
-            description=entry.description, found=False,
+            description=entry.description, value_kind=entry.value_kind,
+            value_type=entry.value_type, found=False,
             error=f"module {entry.module} not loaded",
         )
     if entry.mode == "literal_u32":
