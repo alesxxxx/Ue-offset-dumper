@@ -41,9 +41,16 @@ def _run_source2(args):
     from src.engines.source2.dumper import dump_source2
     from src.engines.source2.globals import find_cs2_globals
     from src.engines.source2.interfaces import find_cs2_interfaces
+    from src.engines.source2.hook_signature_dumper import dump_hook_signatures
     from src.engines.source2.prediction_dumper import dump_prediction
     from src.output.json_writer import write_all as source2_write_all
     from src.output.prediction_writer import write_prediction_header, write_prediction_json
+    from src.output.signatures_writer import (
+        write_signatures_header,
+        write_signatures_json,
+        write_signatures_loader_header,
+        write_signatures_validation_json,
+    )
     from src.output.source2_globals_writer import (
         write_cs2_globals_header,
         write_cs2_globals_json,
@@ -65,7 +72,7 @@ def _run_source2(args):
     total_start = time.time()
     process_name = args.process
 
-    print(f"\n[1/6] Finding {process_name}...")
+    print(f"\n[1/7] Finding {process_name}...")
     pid = get_pid_by_name(process_name)
     if not pid:
         print("  [!!] Process not found. Make sure the game is running.")
@@ -82,7 +89,7 @@ def _run_source2(args):
         else:
             print(f"  [>>] {current_msg}", flush=True)
 
-    print("\n[2/6] Running Source 2 schema/classes/enums dump...")
+    print("\n[2/7] Running Source 2 schema/classes/enums dump...")
     handle = attach(pid)
     if not handle:
         print("  [!!] Could not attach. Try running as admin.")
@@ -108,7 +115,7 @@ def _run_source2(args):
 
     print(f"  [OK] {len(dump.structs)} structs/classes, {len(dump.enums)} enums")
 
-    print("\n[3/6] Scanning CS2 engine globals...")
+    print("\n[3/7] Scanning CS2 engine globals...")
     handle_globals = attach(pid)
     if not handle_globals:
         print("  [!!] Could not attach for global scanning.")
@@ -129,7 +136,7 @@ def _run_source2(args):
     if build_number:
         print(f"  [OK] CS2 build number: {build_number}")
 
-    print("\n[4/6] Scanning key buttons and CreateInterface registries...")
+    print("\n[4/7] Scanning key buttons and CreateInterface registries...")
     handle_runtime = attach(pid)
     if not handle_runtime:
         print("  [!!] Could not attach for runtime registry scanning.")
@@ -155,7 +162,7 @@ def _run_source2(args):
     print(f"  [OK] Key buttons: {buttons_ok} resolved")
     print(f"  [OK] Interfaces: {interfaces_ok} resolved")
 
-    print("\n[5/6] Scanning CS2 prediction offsets...")
+    print("\n[5/7] Scanning CS2 prediction offsets...")
     handle_prediction = attach(pid)
     if not handle_prediction:
         print("  [!!] Could not attach for prediction scanning.")
@@ -173,7 +180,30 @@ def _run_source2(args):
     pred_ok = sum(1 for r in pred_dump.all_results if r.found)
     print(f"  [OK] Prediction offsets: {pred_ok}/{len(pred_dump.all_results)} resolved")
 
-    print(f"\n[6/6] Writing output to {output_dir}/...")
+    print("\n[6/7] Scanning CS2 hook signatures...")
+    handle_hooks = attach(pid)
+    if not handle_hooks:
+        print("  [!!] Could not attach for hook signature scanning.")
+        return 1
+    try:
+        hook_dump = dump_hook_signatures(
+            handle=handle_hooks,
+            pid=pid,
+            progress_callback=progress,
+            log_fn=lambda m: print(f"  {m}"),
+        )
+    finally:
+        if handle_hooks:
+            detach(handle_hooks)
+    hook_ok = hook_dump.found_count
+    hook_total = len(hook_dump.entries)
+    print(f"  [OK] Hook signatures: {hook_ok}/{hook_total} matched")
+    if hook_dump.required_failed:
+        print(f"  [!!] REQUIRED signatures failed: {len(hook_dump.required_failed)}")
+        for r in hook_dump.required_failed:
+            print(f"      - {r.name}: {r.error}")
+
+    print(f"\n[7/7] Writing output to {output_dir}/...")
     source2_write_all(
         output_dir,
         dump,
@@ -241,6 +271,24 @@ def _run_source2(args):
         process_name=process_name,
     )
 
+    write_signatures_header(
+        os.path.join(output_dir, "cs2_signatures.hpp"),
+        process_name=process_name,
+    )
+    write_signatures_json(
+        os.path.join(output_dir, "cs2_signatures.json"),
+        process_name=process_name,
+    )
+    write_signatures_validation_json(
+        os.path.join(output_dir, "cs2_signatures_validation.json"),
+        hook_dump.entries,
+        process_name=process_name,
+    )
+    write_signatures_loader_header(
+        os.path.join(output_dir, "cs2_signatures_loader.hpp"),
+        process_name=process_name,
+    )
+
     total_elapsed = time.time() - total_start
     write_cs2_info_json(
         os.path.join(output_dir, "cs2_info.json"),
@@ -281,6 +329,7 @@ def _run_source2(args):
     print(f"  Enums: {len(dump.enums)}")
     print(f"  Buttons: {buttons_ok}")
     print(f"  Interfaces: {interfaces_ok}")
+    print(f"  Hook Sigs: {hook_ok}/{hook_total}")
     print(f"{'=' * 60}")
 
     return 0
