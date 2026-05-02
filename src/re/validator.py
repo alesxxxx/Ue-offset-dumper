@@ -68,10 +68,20 @@ def validate_entry_offline(resolver: ModuleResolver, entry: SignatureEntry, *, m
             evidence={"module_path": image.path, "image_base": image.image_base},
         )
 
-    try:
-        hits = image.scan_pattern(entry.pattern, max_results=max_hits + 1)
-    except ValueError as exc:
-        return ValidationResult(entry=entry, found=False, error=str(exc))
+    hits = []
+    matched_pattern = ""
+    pattern_errors = []
+    for pattern in [entry.pattern] + list(entry.fallbacks or []):
+        try:
+            hits = image.scan_pattern(pattern, max_results=max_hits + 1)
+        except ValueError as exc:
+            pattern_errors.append(str(exc))
+            continue
+        if hits:
+            matched_pattern = pattern
+            break
+    if not hits and pattern_errors and not entry.pattern:
+        return ValidationResult(entry=entry, found=False, error="; ".join(pattern_errors))
 
     if entry.resolve in {"call", "rip", "rip_call"}:
         for hit in hits:
@@ -99,6 +109,7 @@ def validate_entry_offline(resolver: ModuleResolver, entry: SignatureEntry, *, m
             "image_base": image.image_base,
             "hit_count": len(hits),
             "truncated": len(hits) > max_hits,
+            "pattern_matched": matched_pattern,
         },
     )
 
@@ -139,7 +150,13 @@ def validate_entry_live(process_name: str, entry: SignatureEntry, *, max_hits: i
     if not handle:
         return ValidationResult(entry=entry, found=False, error="could not attach to process")
     try:
-        addrs = scan_pattern(handle, module_base, module_size, entry.pattern, max_results=max_hits + 1)
+        addrs = []
+        matched_pattern = ""
+        for pattern in [entry.pattern] + list(entry.fallbacks or []):
+            addrs = scan_pattern(handle, module_base, module_size, pattern, max_results=max_hits + 1)
+            if addrs:
+                matched_pattern = pattern
+                break
         hits: List[SignatureHit] = []
         for address in addrs[:max_hits]:
             hit = SignatureHit(rva=address - module_base, va=address, section="")
@@ -175,6 +192,7 @@ def validate_entry_live(process_name: str, entry: SignatureEntry, *, max_hits: i
             "module_path": module_path,
             "hit_count": len(addrs),
             "truncated": len(addrs) > max_hits,
+            "pattern_matched": matched_pattern,
         },
     )
 

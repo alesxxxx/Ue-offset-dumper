@@ -14,6 +14,7 @@ class SignatureEntry:
     module: str
     kind: str = "pattern"
     pattern: str = ""
+    fallbacks: List[str] = field(default_factory=list)
     symbol: str = ""
     resolve: str = "direct"
     disp_offset: int = 3
