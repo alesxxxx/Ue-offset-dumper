@@ -48,6 +48,11 @@ if errorlevel 1 (
     echo   [AUTO]  dnfile not found -- installing...
     pip install dnfile >nul 2>&1
 )
+python -c "import capstone, pefile" >nul 2>nul
+if errorlevel 1 (
+    echo   [AUTO]  signature research dependencies not found -- installing...
+    pip install capstone pefile >nul 2>&1
+)
 for /f "delims=" %%v in ('python -c "import PyInstaller; print(PyInstaller.__version__)" 2^>^&1') do set "PIVER=%%v"
 echo   [ OK ]  PyInstaller v%PIVER%
 

@@ -32,6 +32,8 @@ User-mode (`ReadProcessMemory`) works fine for unprotected and most lightly prot
 
 - **Python 3.10+**
 - **Windows 10/11 x64**
+- **psutil**
+- **capstone + pefile** (signature research CLI)
 - Visual Studio 2022 + WDK (only required to build the kernel driver)
 
 ---
@@ -55,6 +57,21 @@ python -m src.ui.cli --engine mono --process MyUnityGame.exe
 python -m src.ui.cli --engine il2cpp --process MyGame.exe --metadata path/to/global-metadata.dat
 python -m src.ui.cli --process MyGame.exe --kernel
 ```
+
+### CS2 Signature Research CLI
+
+```cmd
+pip install capstone pefile
+python -m src.ui.sigcli validate --preset extended --module-dir "C:\Path\To\CS2\game\csgo\bin\win64"
+python -m src.ui.sigcli scan --pack cs2_sigs.hpp --module-dir "C:\Path\To\CS2\game\csgo\bin\win64"
+python -m src.ui.sigcli discover client.dll --module-dir "C:\Path\To\CS2\game\csgo\bin\win64" --string SubmitChatText
+python -m src.ui.sigcli func client.dll --module-dir "C:\Path\To\CS2\game\csgo\bin\win64" --rva 0xC5C2A0
+```
+
+The research CLI validates built-in CS2 tables, parses `#define NAME_PATTERN "..."`
+packs, scans exports such as decorated `tier0.dll` symbols, finds string xrefs,
+and generates masked candidate signatures for broken patterns. PyGhidra/Ghidra
+is optional and only used when `func --ghidra` is requested.
 
 ### Building the kernel driver (optional)
 
