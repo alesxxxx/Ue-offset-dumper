@@ -168,7 +168,7 @@ def write_offsets_json(
 
     data = {
         "credit": {
-            "dumper": "UE/Unity Dumper",
+            "dumper": "GameSDK Dumper",
             "link": "https://github.com/alesxxxx/game-sdk-dumper",
         },
     }

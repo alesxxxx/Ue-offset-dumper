@@ -1,4 +1,5 @@
 import builtins
+import json
 import os
 import struct
 import tempfile
@@ -8,7 +9,9 @@ from unittest import mock
 
 from src.core import driver
 from src.core.models import SDKDump, StructInfo
+from src.engines.source2.globals import CS2GlobalResult
 from src.output import json_writer
+from src.output.source2_globals_writer import write_cs2_globals_header, write_cs2_globals_json
 
 
 class TestDriverRegressions(unittest.TestCase):
@@ -56,6 +59,7 @@ class TestJsonWriterRegressions(unittest.TestCase):
             StructInfo(
                 name="Actor",
                 full_name="Game.Actor",
+                address=0,
                 package="Game",
                 size=0x8,
                 is_class=True,
@@ -81,6 +85,42 @@ class TestJsonWriterRegressions(unittest.TestCase):
                     engine="ue",
                     ue_version="5.1",
                 )
+
+
+class TestSource2GlobalsWriterRegressions(unittest.TestCase):
+    def test_cs2_globals_writer_preserves_value_semantics(self):
+        results = [
+            CS2GlobalResult(
+                name="dwLocalPlayerPawn",
+                module="client.dll",
+                rva=0x20547A0,
+                absolute=0x7FFA00000000 + 0x20547A0,
+                description="Local C_CSPlayerPawn pointer.",
+                value_kind="address",
+                value_type="C_CSPlayerPawn*",
+                source_base_from="dwPrediction",
+                source_field_offset=0xF0,
+            )
+        ]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            header_path = os.path.join(temp_dir, "cs2_offsets.hpp")
+            json_path = os.path.join(temp_dir, "cs2_offsets.json")
+            write_cs2_globals_header(header_path, results, "cs2.exe")
+            write_cs2_globals_json(json_path, results, "cs2.exe")
+
+            with open(header_path, "r", encoding="utf-8") as f:
+                header = f.read()
+            self.assertIn("kind=address; type=C_CSPlayerPawn*", header)
+            self.assertIn("computed_from=dwPrediction+0xF0", header)
+
+            with open(json_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            item = payload["globals"]["client.dll"]["dwLocalPlayerPawn"]
+            self.assertEqual(item["value_kind"], "address")
+            self.assertEqual(item["value_type"], "C_CSPlayerPawn*")
+            self.assertEqual(item["computed_from"]["base"], "dwPrediction")
+            self.assertEqual(item["computed_from"]["field_offset_int"], 0xF0)
 
 
 if __name__ == "__main__":

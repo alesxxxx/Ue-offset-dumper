@@ -1,4 +1,4 @@
-# UE/Unity Dumper
+# GameSDK Dumper
 
 Automated SDK offset dumper for **Unreal Engine 4/5** and **Unity (IL2CPP / Mono)** games on Windows. Also includes a Source engine netvar dumper.
 

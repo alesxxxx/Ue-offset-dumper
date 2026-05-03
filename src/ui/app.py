@@ -500,7 +500,7 @@ int main()
 _TPL_README = """# Cheat Template  -  Kernel Driver Example
 
 A starter project for building a kernel-mode game cheat using offsets
-from the UE/Unity Dumper.
+from the GameSDK Dumper.
 
 ## Structure
 
@@ -543,7 +543,7 @@ class DumperApp:
         self._apply_dpi_scale(self._active_dpi_scale)
         self._use_custom_chrome = True
         self._custom_titlebar = None
-        self.root.title("UE/Unity Dumper")
+        self.root.title("GameSDK Dumper")
         self.root.geometry("980x860")
         self.root.minsize(780, 700)
         self.root.configure(bg=BG)
@@ -762,7 +762,7 @@ class DumperApp:
         brand.bind("<ButtonPress-1>", self._start_window_drag)
         brand.bind("<B1-Motion>", self._drag_window)
         for text, font, fg in (
-            ("UE/Unity Dumper", FONT_UI_BOLD, FG),
+            ("GameSDK Dumper", FONT_UI_BOLD, FG),
             ("Multi-engine offset dumper", FONT_UI_XS, FG_SUBTLE),
         ):
             lbl = tk.Label(brand, text=text, font=font, fg=fg, bg=BG_CARD)
@@ -839,7 +839,7 @@ class DumperApp:
 
         title_frame = tk.Frame(header, bg=BG)
         title_frame.pack(side=tk.LEFT)
-        tk.Label(title_frame, text="UE/Unity Dumper", font=FONT_TITLE,
+        tk.Label(title_frame, text="GameSDK Dumper", font=FONT_TITLE,
                  fg=FG, bg=BG).pack(anchor="w")
         tk.Label(title_frame, text="Unreal Engine / Unity / Source",
                  font=FONT_UI_LG, fg=FG_DIM, bg=BG).pack(anchor="w", pady=(2, 0))
@@ -1975,7 +1975,7 @@ class DumperApp:
                     "ok",
                 )
                 messagebox.showinfo(
-                    "UE/Unity Dumper",
+                    "GameSDK Dumper",
                     "DPI scale saved.\n\nRestart or reopen the dumper to resize the full menu cleanly.",
                 )
             else:
@@ -2015,7 +2015,7 @@ class DumperApp:
 
     def _open_first_run_wizard(self, *, force: bool = False):
         popup = tk.Toplevel(self.root)
-        popup.title("Welcome to UE/Unity Dumper")
+        popup.title("Welcome to GameSDK Dumper")
         popup.configure(bg=BG)
         self._set_window_size(popup, 700, 420, min_width=640, min_height=380)
         popup.resizable(True, True)
@@ -2123,7 +2123,7 @@ class DumperApp:
     def _create_share_pack(self):
         dump_dir = self.output_var.get().strip()
         if not dump_dir or not os.path.isfile(os.path.join(dump_dir, "OffsetsInfo.json")):
-            messagebox.showwarning("UE/Unity Dumper", "No dump found. Run Full SDK Dump first.")
+            messagebox.showwarning("GameSDK Dumper", "No dump found. Run Full SDK Dump first.")
             return
 
         game_name = self.process_name.replace(".exe", "").replace(".dll", "") if self.process_name else os.path.basename(os.path.dirname(os.path.normpath(dump_dir)))
@@ -2390,7 +2390,7 @@ class DumperApp:
     def _edit_known_good_override(self):
         record = self._known_good_selected_record()
         if not record:
-            messagebox.showinfo("UE/Unity Dumper", "Select a game in Known Good first.")
+            messagebox.showinfo("GameSDK Dumper", "Select a game in Known Good first.")
             return
 
         popup = tk.Toplevel(self.root)
@@ -2422,7 +2422,7 @@ class DumperApp:
         def _save_override():
             parsed = parse_user_date(value_var.get().strip())
             if parsed is None:
-                messagebox.showerror("UE/Unity Dumper", "Invalid date. Use YYYY-MM-DD or M/D/YY.")
+                messagebox.showerror("GameSDK Dumper", "Invalid date. Use YYYY-MM-DD or M/D/YY.")
                 return
             overrides = self._gui_settings.get("latest_update_overrides", {})
             if not isinstance(overrides, dict):
@@ -2444,7 +2444,7 @@ class DumperApp:
     def _clear_known_good_override(self):
         record = self._known_good_selected_record()
         if not record:
-            messagebox.showinfo("UE/Unity Dumper", "Select a game in Known Good first.")
+            messagebox.showinfo("GameSDK Dumper", "Select a game in Known Good first.")
             return
         overrides = self._gui_settings.get("latest_update_overrides", {})
         if not isinstance(overrides, dict):
@@ -2863,13 +2863,13 @@ class DumperApp:
                     self._log("Webhook URL cleared (auto delivery disabled).", "warn")
                 popup.destroy()
             except Exception as exc:
-                messagebox.showerror("UE/Unity Dumper", f"Failed to save webhook settings: {exc}")
+                messagebox.showerror("GameSDK Dumper", f"Failed to save webhook settings: {exc}")
 
         def _test_delivery():
             url = url_var.get().strip()
             mode = mode_var.get().strip().lower()
             if not url:
-                messagebox.showerror("UE/Unity Dumper", "Webhook URL is required for test delivery.")
+                messagebox.showerror("GameSDK Dumper", "Webhook URL is required for test delivery.")
                 url_entry.focus_set()
                 return
 
@@ -2894,7 +2894,7 @@ class DumperApp:
                 board = format_offset_status_board(statuses)
                 payload = {
                     "event": "webhook_test",
-                    "tool": "UE/Unity Dumper",
+                    "tool": "GameSDK Dumper",
                     "source": "gui",
                     "sent_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                     "status_board": board,
@@ -3012,7 +3012,7 @@ class DumperApp:
 
             payload = {
                 "event": "dump_complete",
-                "tool": "UE/Unity Dumper",
+                "tool": "GameSDK Dumper",
                 "source": "gui",
                 "engine": engine,
                 "process": process_name,
@@ -4985,7 +4985,7 @@ class DumperApp:
 
         dump_dir = self.output_var.get()
         if not dump_dir or not os.path.exists(os.path.join(dump_dir, "ClassesInfo.json")):
-            messagebox.showwarning("UE/Unity Dumper", "Run a dump first so the template can seed itself from real output.")
+            messagebox.showwarning("GameSDK Dumper", "Run a dump first so the template can seed itself from real output.")
             return
 
         mode_result = [None]
@@ -5093,7 +5093,7 @@ class DumperApp:
     def _open_live_viewer(self):
         dump_dir = self.output_var.get()
         if not dump_dir or not os.path.exists(os.path.join(dump_dir, "ClassesInfo.json")):
-            messagebox.showwarning("UE/Unity Dumper", "No dump found. Run Full SDK Dump first.")
+            messagebox.showwarning("GameSDK Dumper", "No dump found. Run Full SDK Dump first.")
             return
         try:
             from src.ui.live_viewer import LiveViewerApp, load_dump_data
@@ -5108,7 +5108,7 @@ class DumperApp:
     def _verify_dump_legacy(self):
         dump_dir = self.output_var.get()
         if not dump_dir or not os.path.exists(os.path.join(dump_dir, "ClassesInfo.json")):
-            messagebox.showwarning("UE/Unity Dumper", "No dump found. Run Full SDK Dump first.")
+            messagebox.showwarning("GameSDK Dumper", "No dump found. Run Full SDK Dump first.")
             return
 
         self._log("Verifying dump...", "info")
@@ -5233,7 +5233,7 @@ class DumperApp:
 
         procs = get_running_processes()
         if not procs:
-            messagebox.showwarning("UE/Unity Dumper", "Could not enumerate processes (need admin?).")
+            messagebox.showwarning("GameSDK Dumper", "Could not enumerate processes (need admin?).")
             return
 
         picker = tk.Toplevel(self.root)
@@ -5300,7 +5300,7 @@ class DumperApp:
     def _detect_process(self):
         name = self.process_var.get().strip()
         if not name:
-            messagebox.showwarning("UE/Unity Dumper", "Enter a process name first.")
+            messagebox.showwarning("GameSDK Dumper", "Enter a process name first.")
             return
 
         self._log(f"Looking for {name}...", "info")
@@ -5729,7 +5729,7 @@ class DumperApp:
 
     def _write_source_header(self, path, sdk_dump):
         lines = [
-            "// Auto-generated by UE/Unity Dumper — Source Engine Netvars",
+            "// Auto-generated by GameSDK Dumper — Source Engine Netvars",
             "// Paste into your project or #include directly.",
             f"// Process: {self.process_name}",
             f"// Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}",
@@ -6976,7 +6976,7 @@ class DumperApp:
     def _verify_dump(self):
         dump_dir = self.output_var.get()
         if not dump_dir or not os.path.exists(os.path.join(dump_dir, "ClassesInfo.json")):
-            messagebox.showwarning("UE/Unity Dumper", "No dump found. Run Full SDK Dump first.")
+            messagebox.showwarning("GameSDK Dumper", "No dump found. Run Full SDK Dump first.")
             return
 
         self._log("Checking current dump...", "info")
@@ -7032,7 +7032,7 @@ class DumperApp:
 
     def _verify_library(self):
         if not os.path.isdir(self.games_root):
-            messagebox.showwarning("UE/Unity Dumper", f"Games folder not found:\n{self.games_root}")
+            messagebox.showwarning("GameSDK Dumper", f"Games folder not found:\n{self.games_root}")
             return
 
         self._log("Verifying dump library under games...", "info")

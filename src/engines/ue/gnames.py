@@ -134,7 +134,7 @@ def clear_fname_cache() -> None:
     _full_cache_fallback_budget = 4096
     _fnames_fully_cached = False
 
-_FULL_FNAME_CACHE_MAX = 500_000
+_FULL_FNAME_CACHE_MAX = 8_000_000
 _full_fname_cache: OrderedDict = OrderedDict()
 _fnames_fully_cached: bool = False
 _full_cache_miss_indices: Dict[Tuple[int, int, Optional[bool]], bool] = {}
@@ -298,7 +298,8 @@ def cache_all_fnames(
                 last_progress_emit = now
             continue
 
-        bsize = _current_cursor + 256 if block_idx == _current_block else 256 * 1024
+        block_size_bytes = 256 * 1024 if case_preserving else 128 * 1024
+        bsize = _current_cursor + 256 if block_idx == _current_block else block_size_bytes
         bdata = _read_func(bptr, bsize)
         if not bdata:
             now = _time.monotonic()
@@ -2332,27 +2333,31 @@ def _try_read_entry(
     entry_offset: int,
     case_preserving: bool,
 ) -> str:
+    import struct as _struct
+
     if case_preserving:
         byte_pos = block_ptr + 4 * entry_offset
-        header_word = read_uint16(handle, byte_pos + 4)
-        if header_word == 0:
-            return ""
-        name_length = header_word >> 1
-        name_data_addr = byte_pos + 6
+        header_off = 4
+        body_off = 6
     else:
         byte_pos = block_ptr + 2 * entry_offset
-        header_word = read_uint16(handle, byte_pos)
-        if header_word == 0:
-            return ""
-        name_length = header_word >> 6
-        name_data_addr = byte_pos + 2
+        header_off = 0
+        body_off = 2
 
+    raw_combined = read_bytes(handle, byte_pos, body_off + 1024)
+    if not raw_combined or len(raw_combined) < body_off + 2:
+        return ""
+
+    header_word = _struct.unpack_from("<H", raw_combined, header_off)[0]
+    if header_word == 0:
+        return ""
+    name_length = (header_word >> 1) if case_preserving else (header_word >> 6)
     if name_length <= 0 or name_length > 1024:
         return ""
 
-    raw = read_bytes(handle, name_data_addr, name_length)
-    if not raw or len(raw) < name_length:
+    if len(raw_combined) < body_off + name_length:
         return ""
+    raw = raw_combined[body_off : body_off + name_length]
 
     try:
         text = raw.decode("utf-8", errors="strict")

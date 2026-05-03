@@ -69,7 +69,7 @@ def _maybe_send_webhook(
 
         payload = {
             "event": "dump_complete",
-            "tool": "UE/Unity Dumper",
+            "tool": "GameSDK Dumper",
             "engine": engine,
             "process": process_name,
             "output_dir": os.path.abspath(output_dir) if output_dir else "",
@@ -104,7 +104,7 @@ def _run_steam_audit(args):
 
     print()
     print("=" * 60)
-    print("  UE/Unity Dumper - Steam Library Audit")
+    print("  GameSDK Dumper - Steam Library Audit")
     print("=" * 60)
 
     total_start = time.time()
@@ -132,7 +132,7 @@ def _run_il2cpp(args):
 
     print()
     print("=" * 60)
-    print("  UE/Unity Dumper — Unity IL2CPP Offset Dumper")
+    print("  GameSDK Dumper — Unity IL2CPP Offset Dumper")
     print("=" * 60)
 
     total_start = time.time()
@@ -284,7 +284,7 @@ def _run_mono(args):
 
     print()
     print("=" * 60)
-    print("  UE/Unity Dumper — Unity Mono Offset Dumper")
+    print("  GameSDK Dumper — Unity Mono Offset Dumper")
     print("=" * 60)
 
     total_start = time.time()
@@ -382,7 +382,7 @@ def main():
     enable_stdout_tee()
     
     parser = argparse.ArgumentParser(
-        description="UE/Unity Dumper — Unreal Engine / Unity / Source offset dumper",
+        description="GameSDK Dumper — Unreal Engine / Unity / Source offset dumper",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -517,7 +517,7 @@ Examples:
 
     print()
     print("=" * 60)
-    print("  UE/Unity Dumper — Unreal Engine Offset Dumper")
+    print("  GameSDK Dumper — Unreal Engine Offset Dumper")
     print("=" * 60)
 
     total_start = time.time()

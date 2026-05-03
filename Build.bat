@@ -1,12 +1,12 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
-title UE/Unity Dumper Build
+title GameSDK Dumper Build
 cd /d "%~dp0"
 
 echo.
 echo   +------------------------------------------+
-echo   ^|           UE / Unity  Dumper            ^|
-echo   ^|            SDK Offset Dumper            ^|
+echo   ^|          GameSDK Dumper          ^|
+echo   ^|      Multi-Engine SDK Dumper      ^|
 echo   +------------------------------------------+
 echo.
 echo   Build started  -  %date%  %time%
@@ -190,13 +190,13 @@ if errorlevel 1 (
 echo.
 
 echo   +------------------------------------------+
-echo   ^|  Step 4 / 4  --  Dumper.exe             ^|
+echo   ^|  Step 4 / 4  --  GameSDKDumper.exe      ^|
 echo   +------------------------------------------+
 echo.
 
-if exist "Dumper.exe" (
-    echo   .  Removing old Dumper.exe ...
-    del "Dumper.exe" >nul 2>nul
+if exist "GameSDKDumper.exe" (
+    echo   .  Removing old GameSDKDumper.exe ...
+    del "GameSDKDumper.exe" >nul 2>nul
 )
 
 echo   Running PyInstaller
@@ -204,7 +204,7 @@ echo.
 
 pyinstaller --noconfirm --onefile --windowed --log-level WARN ^
     --distpath . ^
-    --name "Dumper" ^
+    --name "GameSDKDumper" ^
     --add-data "src;src" ^
     --add-data "bin;bin" ^
     --hidden-import "src.core.memory" ^
@@ -255,18 +255,18 @@ if exist "bin\SteamLoginHelper.exe" (
     echo   [SKIP]  bin\SteamLoginHelper.exe  [install .NET Framework 4.8 Dev Pack to build]
 )
 
-if exist "Dumper.exe" (
-    echo   [ OK ]  Dumper.exe
+if exist "GameSDKDumper.exe" (
+    echo   [ OK ]  GameSDKDumper.exe
 ) else (
-    echo   [FAIL]  Dumper.exe             [check PyInstaller output above]
+    echo   [FAIL]  GameSDKDumper.exe             [check PyInstaller output above]
 )
 
 echo.
 echo   -------------------------------------------
 echo.
 
-if exist "Dumper.exe" (
-    echo   Build complete.  Run Dumper.exe to launch.
+if exist "GameSDKDumper.exe" (
+    echo   Build complete.  Run GameSDKDumper.exe to launch.
 ) else (
     echo   Build failed.  Check the PyInstaller output above for errors.
 )

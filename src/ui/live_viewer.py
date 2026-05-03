@@ -215,7 +215,7 @@ class LiveViewerApp:
 
         title_bar = tk.Frame(r, bg=C_HDR, pady=6, padx=12)
         title_bar.pack(fill=tk.X)
-        lbl(title_bar, "UE/Unity Dumper", fg=C_ACCENT, bg=C_HDR,
+        lbl(title_bar, "GameSDK Dumper", fg=C_ACCENT, bg=C_HDR,
             font=_F13B).pack(side=tk.LEFT)
         lbl(title_bar, "  Live Struct Viewer", fg=C_DIM,
             bg=C_HDR).pack(side=tk.LEFT)

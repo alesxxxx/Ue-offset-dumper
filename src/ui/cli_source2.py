@@ -66,7 +66,7 @@ def _run_source2(args):
 
     print()
     print("=" * 60)
-    print("  UE/Unity Dumper - Source 2 Offset Dumper")
+    print("  GameSDK Dumper - Source 2 Offset Dumper")
     print("=" * 60)
 
     total_start = time.time()

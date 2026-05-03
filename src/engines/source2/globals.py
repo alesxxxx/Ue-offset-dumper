@@ -108,6 +108,14 @@ ALL_CS2_GLOBALS: List[CS2Global] = [
         description="CGlowManager singleton (ESP glow outlines).",
     ),
     CS2Global(
+        name="dwInventoryManager",
+        module="client.dll",
+        pattern="48 8D 05 ?? ?? ?? ?? C3 CC CC CC CC CC CC CC CC 8B 91",
+        disp_offset=3, instruction_size=7,
+        value_type="CCSInventoryManager*",
+        description="CCSInventoryManager singleton (GetInstance).",
+    ),
+    CS2Global(
         name="dwLocalPlayerController",
         module="client.dll",
         pattern="48 8B 05 ?? ?? ?? ?? 41 89 BE",
