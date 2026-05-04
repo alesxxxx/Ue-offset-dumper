@@ -127,7 +127,12 @@ if errorlevel 1 (
     goto :skip_kdmapper
 )
 
-if not exist "kdmapper" (
+if not exist "kdmapper\kdmapper.sln" (
+    if exist "kdmapper" (
+        echo   kdmapper folder exists but is empty ^(submodule not populated^).
+        echo   Removing empty folder and cloning fresh...
+        rmdir /s /q "kdmapper" >nul 2>nul
+    )
     echo   Cloning kdmapper repository...
     git clone https://github.com/TheCruZ/kdmapper.git >nul 2>&1
     if errorlevel 1 (
