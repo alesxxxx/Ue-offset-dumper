@@ -825,6 +825,12 @@ def read_float(handle: int, address: int) -> float:
         return 0.0
     return struct.unpack_from("<f", data)[0]
 
+def read_double(handle: int, address: int) -> float:
+    data = read_bytes(handle, address, 8)
+    if len(data) < 8:
+        return 0.0
+    return struct.unpack_from("<d", data)[0]
+
 def read_string(handle: int, address: int, max_len: int = 256) -> str:
     data = read_bytes(handle, address, max_len)
     if not data:

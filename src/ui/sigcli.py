@@ -9,47 +9,25 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from src.re.cs2_catalog import get_catalog_entries, researched_signature_path
 from src.re.pack_parser import parse_signature_pack_files
 from src.re.pe_image import PEImage
+from src.re.cli_utils import (
+    anchor_rva_from_args,
+    load_image_arg,
+    make_module_resolver,
+    parse_int,
+    print_or_write,
+    write_json_report,
+)
 from src.re.signatures import (
     CandidateSignature,
     SignatureEntry,
-    dump_json,
     generate_masked_patterns,
     score_hit_count,
     to_jsonable,
 )
 from src.re.validator import (
-    ModuleResolver,
-    parse_module_path_args,
     validate_entries_live,
     validate_entries_offline,
 )
-
-
-def _write_json(path: str, payload) -> None:
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(to_jsonable(payload), handle, indent=2)
-
-
-def _print_or_write(args, payload, *, default_name: str) -> None:
-    if getattr(args, "json", False):
-        text = dump_json(payload)
-        if args.output:
-            _write_json(args.output, payload)
-            print(f"[OK] Wrote {os.path.abspath(args.output)}")
-        else:
-            print(text)
-        return
-    if args.output:
-        _write_json(args.output, payload)
-        print(f"[OK] Wrote {os.path.abspath(args.output)}")
-
-
-def _module_resolver(args) -> ModuleResolver:
-    return ModuleResolver(
-        module_dir=getattr(args, "module_dir", "") or "",
-        module_paths=parse_module_path_args(getattr(args, "module", []) or []),
-    )
 
 
 def _load_entries(args) -> List[SignatureEntry]:
@@ -98,9 +76,9 @@ def cmd_validate(args) -> int:
     if args.live:
         results = validate_entries_live(args.process, entries, max_hits=args.max_hits)
     else:
-        results = validate_entries_offline(entries, _module_resolver(args), max_hits=args.max_hits)
+        results = validate_entries_offline(entries, make_module_resolver(args), max_hits=args.max_hits)
     payload = {"kind": "validation_report", "results": results}
-    _print_or_write(args, payload, default_name="validation.json")
+    print_or_write(args, payload, default_name="validation.json")
     if args.json:
         return 0 if any(result.found for result in results) else 1
     return _print_validation_summary(results)
@@ -114,18 +92,8 @@ def cmd_scan(args) -> int:
     return cmd_validate(args)
 
 
-def _load_image_arg(args) -> Optional[PEImage]:
-    resolver = _module_resolver(args)
-    image = resolver.get_image(args.module_name)
-    if image is None and os.path.exists(args.module_name):
-        image = PEImage(args.module_name)
-    if image is None:
-        print(f"[FAIL] Could not resolve module/path {args.module_name!r}")
-    return image
-
-
 def cmd_strings(args) -> int:
-    image = _load_image_arg(args)
+    image = load_image_arg(args)
     if image is None:
         return 1
     results = image.find_strings(
@@ -135,7 +103,7 @@ def cmd_strings(args) -> int:
         include_utf16=not args.no_utf16,
     )
     payload = {"kind": "strings", "module": image.module_name, "path": image.path, "strings": results}
-    _print_or_write(args, payload, default_name="strings.json")
+    print_or_write(args, payload, default_name="strings.json")
     if args.json:
         return 0
     for item in results:
@@ -143,20 +111,16 @@ def cmd_strings(args) -> int:
     return 0
 
 
-def _parse_int(value: str) -> int:
-    return int(value, 0)
-
-
 def cmd_xrefs(args) -> int:
-    image = _load_image_arg(args)
+    image = load_image_arg(args)
     if image is None:
         return 1
     target_rvas: List[int] = []
     string_hits = []
     if args.rva:
-        target_rvas.append(_parse_int(args.rva))
+        target_rvas.append(parse_int(args.rva))
     if args.va:
-        target_rvas.append(image.va_to_rva(_parse_int(args.va)))
+        target_rvas.append(image.va_to_rva(parse_int(args.va)))
     if args.string:
         string_hits = image.find_strings(queries=[args.string], min_len=max(2, len(args.string)), limit=args.limit)
         target_rvas.extend(item.rva for item in string_hits)
@@ -172,7 +136,7 @@ def cmd_xrefs(args) -> int:
         "strings": string_hits,
         "xrefs": xrefs,
     }
-    _print_or_write(args, payload, default_name="xrefs.json")
+    print_or_write(args, payload, default_name="xrefs.json")
     if args.json:
         return 0
     for item in xrefs:
@@ -180,33 +144,11 @@ def cmd_xrefs(args) -> int:
     return 0
 
 
-def _anchor_rva_from_args(image: PEImage, args) -> Optional[int]:
-    if args.rva:
-        return _parse_int(args.rva)
-    if args.va:
-        return image.va_to_rva(_parse_int(args.va))
-    if args.export:
-        hit = image.get_export(args.export)
-        if not hit:
-            print(f"[FAIL] export {args.export!r} not found")
-            return None
-        return hit.rva
-    if args.pattern:
-        hits = image.scan_pattern(args.pattern, max_results=2)
-        if not hits:
-            print("[FAIL] pattern did not match")
-            return None
-        if len(hits) > 1:
-            print("[--] pattern matched more than once; using first hit")
-        return hits[0].rva
-    return None
-
-
 def cmd_func(args) -> int:
-    image = _load_image_arg(args)
+    image = load_image_arg(args)
     if image is None:
         return 1
-    rva = _anchor_rva_from_args(image, args)
+    rva = anchor_rva_from_args(image, args)
     if rva is None:
         print("[FAIL] func requires --rva, --va, --pattern, or --export")
         return 1
@@ -223,7 +165,7 @@ def cmd_func(args) -> int:
         from src.re.ghidra_bridge import decompile_function_best_effort
 
         payload["ghidra"] = decompile_function_best_effort(image.path, rva, timeout_secs=args.ghidra_timeout)
-    _print_or_write(args, payload, default_name="func.json")
+    print_or_write(args, payload, default_name="func.json")
     if args.json:
         return 0
     for row in rows:
@@ -237,7 +179,7 @@ def cmd_func(args) -> int:
 
 
 def cmd_discover(args) -> int:
-    image = _load_image_arg(args)
+    image = load_image_arg(args)
     if image is None:
         return 1
     anchor_rvas: List[int] = []
@@ -246,7 +188,7 @@ def cmd_discover(args) -> int:
         xrefs = image.find_rip_xrefs([item.rva for item in strings], limit=args.limit)
         anchor_rvas.extend(item.source_rva for item in xrefs)
     else:
-        rva = _anchor_rva_from_args(image, args)
+        rva = anchor_rva_from_args(image, args)
         if rva is not None:
             anchor_rvas.append(rva)
     if not anchor_rvas:
@@ -267,7 +209,7 @@ def cmd_discover(args) -> int:
             )
         )
     payload = {"kind": "candidate_signatures", "module": image.module_name, "path": image.path, "candidates": candidates}
-    _print_or_write(args, payload, default_name="discover.json")
+    print_or_write(args, payload, default_name="discover.json")
     if args.json:
         return 0
     for item in candidates:
@@ -302,7 +244,7 @@ def cmd_compare(args) -> int:
             }
         )
     payload = {"kind": "signature_compare", "old": old_image.path, "new": new_image.path, "results": rows}
-    _print_or_write(args, payload, default_name="compare.json")
+    print_or_write(args, payload, default_name="compare.json")
     if args.json:
         return 0
     for row in rows:
@@ -350,11 +292,11 @@ def cmd_promote(args) -> int:
         for entry in entries:
             existing[(entry.kind, entry.module.lower(), entry.name.lower())] = entry
         payload["signatures"] = [to_jsonable(entry) for entry in existing.values()]
-        _write_json(target, payload)
+        write_json_report(target, payload)
         print(f"[OK] Applied {len(entries)} signature(s) to {os.path.abspath(target)}")
     else:
         out = args.output or os.path.join("games", "cs2", "SignatureResearch", "promote_proposal.json")
-        _write_json(out, payload)
+        write_json_report(out, payload)
         print(f"[OK] Wrote promotion proposal to {os.path.abspath(out)}")
         print("     Re-run with --apply to add it to src/engines/source2/researched_signatures.json")
     return 0

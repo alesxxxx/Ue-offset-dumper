@@ -202,7 +202,7 @@ if exist "GameSDKDumper.exe" (
 echo   Running PyInstaller
 echo.
 
-pyinstaller --noconfirm --onefile --windowed --log-level WARN ^
+python -m PyInstaller --noconfirm --onefile --windowed --log-level WARN ^
     --distpath . ^
     --name "GameSDKDumper" ^
     --add-data "src;src" ^
